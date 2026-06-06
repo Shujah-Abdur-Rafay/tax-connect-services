@@ -1,0 +1,103 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Profile images (legacy path) - public read, authenticated write
+    match /profiles/{userId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                  && request.auth.uid == userId
+                  && request.resource.size < 5 * 1024 * 1024
+                  && request.resource.contentType.matches('image/.*');
+    }
+
+    // Professional profile photos uploaded during onboarding
+    // Path: professionals/{firebaseUid}/avatar-<timestamp>.jpg
+    // Public read so the directory cards can render the image.
+    match /professionals/{userId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                  && request.auth.uid == userId
+                  && request.resource.size < 5 * 1024 * 1024
+                  && request.resource.contentType.matches('image/.*');
+    }
+
+    // User documents - authenticated users only (own documents)
+    match /documents/{userId}/{allPaths=**} {
+      allow read, write: if request.auth != null
+                         && request.auth.uid == userId
+                         && request.resource.size < 10 * 1024 * 1024;
+    }
+
+    // Tax documents bucket
+    match /tax-documents/{userId}/{allPaths=**} {
+      allow read, write: if request.auth != null
+                         && request.auth.uid == userId;
+    }
+    // Profile photos uploaded from the user profile page
+    // Path: profile-photos/{firebaseUid}/<timestamp>_<filename>
+    match /profile-photos/{userId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if request.auth != null
+                  && request.auth.uid == userId
+                  && request.resource.size < 5 * 1024 * 1024
+                  && request.resource.contentType.matches('image/.*');
+    }
+
+    // ── Gig-order deliverables ─────────────────────────────────────────
+    // When a pro clicks "Deliver" on a gig order, they upload completed
+    // tax returns / signed 8879s / supporting schedules to:
+    //   gig_orders/{orderId}/deliverables/{filename}
+    //
+    // ONLY the order's pro_id (writer) and the order's client_uid + pro_id
+    // (readers) can touch this path. We cross-check the matching Firestore
+    // gig_orders/{orderId} doc to authorize.
+    match /gig_orders/{orderId}/deliverables/{fileName} {
+      // Read: either party on the order may download.
+      allow read: if request.auth != null
+                  && (
+                    firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.client_uid == request.auth.uid
+                    || firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.pro_id == request.auth.uid
+                  );
+
+      // Write/upload: ONLY the assigned pro on this order, ≤ 25 MB.
+      allow write: if request.auth != null
+                   && firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.pro_id == request.auth.uid
+                   && request.resource.size < 25 * 1024 * 1024;
+
+      // Delete: pro can clean up files they staged but haven't sent.
+      allow delete: if request.auth != null
+                    && firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.pro_id == request.auth.uid;
+    }
+
+    // ── Gig-order source documents (client-uploaded) ───────────────────
+    // Mirror of the deliverables block, but for the CLIENT side: when a
+    // client opens an order in 'new' or 'awaiting_payment' status, they
+    // can attach source documents (W-2s, 1099s, prior-year return,
+    // receipts, etc.) to:
+    //   gig_orders/{orderId}/source-docs/{filename}
+    //
+    // Same cross-check against the Firestore order doc — read access for
+    // BOTH parties (the pro needs to download them to actually prepare
+    // the return), write/delete locked to client_uid only.
+    match /gig_orders/{orderId}/source-docs/{fileName} {
+      // Read: either party on the order may download.
+      allow read: if request.auth != null
+                  && (
+                    firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.client_uid == request.auth.uid
+                    || firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.pro_id == request.auth.uid
+                  );
+
+      // Write/upload: ONLY the order's client, ≤ 25 MB.
+      allow write: if request.auth != null
+                   && firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.client_uid == request.auth.uid
+                   && request.resource.size < 25 * 1024 * 1024;
+
+      // Delete: client can remove a source doc they attached (only
+      // meaningful while work hasn't started — Firestore service layer
+      // enforces the status guardrail).
+      allow delete: if request.auth != null
+                    && firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.client_uid == request.auth.uid;
+    }
+  }
+}
+

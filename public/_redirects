@@ -1,0 +1,19 @@
+# Netlify redirects file
+# Force www redirect to non-www (must be first)
+https://www.refund-connect.com/* https://refund-connect.com/:splat 301!
+http://www.refund-connect.com/* https://refund-connect.com/:splat 301!
+
+# Force HTTPS for non-www
+http://refund-connect.com/* https://refund-connect.com/:splat 301!
+
+# Handle React Router (SPA) - this must come after redirects
+/*    /index.html   200
+
+# Security headers
+/*
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  X-XSS-Protection: 1; mode=block
+  Referrer-Policy: strict-origin-when-cross-origin
+  Content-Security-Policy: upgrade-insecure-requests; default-src 'self' https: data:; script-src 'self' 'unsafe-inline' 'unsafe-eval' https:; style-src 'self' 'unsafe-inline' https:; img-src 'self' data: https:; font-src 'self' https: data:; connect-src 'self' https:;

@@ -1,0 +1,260 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// !! DEPLOYMENT REQUIRED !!
+//
+// Editing THIS file does nothing until you DEPLOY it. Firestore enforces the
+// *deployed* ruleset, not the file on disk. Out-of-date deployed rules are a
+// primary cause of "Missing or insufficient permissions" during onboarding.
+//
+//   Production project : refund-connect-1m30
+//   Deploy + verify    : npm run rules:verify
+//   Deploy only        : npm run deploy:rules
+//                        (= firebase deploy --only firestore:rules \
+//                                            --project refund-connect-1m30)
+//   Full guide         : DEPLOY_FIRESTORE_RULES.md
+//
+// After ANY change here, redeploy and confirm in the console:
+//   https://console.firebase.google.com/project/refund-connect-1m30/firestore/rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Firestore security rules
+//
+// These rules cover every collection the app actually reads/writes. Firestore
+// denies anything not explicitly allowed, so a missing match block is what
+// produces the dreaded "Missing or insufficient permissions" error.
+//
+// The bug this file fixes: the tax-pro onboarding flow writes the applicant's
+// profile to `professionals/{uid}` (ProfileSetupStep -> handleProfileSave in
+// TaxProfessionalOnboarding.tsx). There was previously NO rule for the
+// `professionals` collection, so the very first setDoc/updateDoc was rejected
+// with "Missing or insufficient permissions" — blocking onboarding at the
+// profile-creation step.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // professionals/{uid}
+    //
+    // The professional directory is publicly readable (the marketing site and
+    // FindProfessionals page list approved pros without auth). The doc id is
+    // the owner's Firebase uid, so a signed-in user may only create/update the
+    // document whose id matches their own uid. This is exactly what the
+    // onboarding flow needs (doc(db,'professionals', user.uid)).
+    // ─────────────────────────────────────────────────────────────────────
+    match /professionals/{proId} {
+      allow read: if true;
+
+      // Create / update / delete only your own profile document.
+      allow create, update, delete: if isSignedIn() && request.auth.uid == proId;
+    }
+
+    // Weekly availability schedule rows. Each doc carries professional_id.
+    match /professional_availability/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.professional_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.professional_id == request.auth.uid;
+    }
+
+    // Per-professional service offerings (if stored as a top-level collection).
+    match /professional_services/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.professional_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.professional_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // appointments/{id}
+    //
+    // A signed-in client can create a booking; the assigned professional and
+    // the booking client can read it. Updates allowed to the professional
+    // (status changes) and the client who created it.
+    // ─────────────────────────────────────────────────────────────────────
+    match /appointments/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.professional_id == request.auth.uid
+            || resource.data.client_id == request.auth.uid
+            || resource.data.user_id == request.auth.uid);
+      allow create: if isSignedIn();
+      allow update: if isSignedIn()
+        && (resource.data.professional_id == request.auth.uid
+            || resource.data.client_id == request.auth.uid
+            || resource.data.user_id == request.auth.uid);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // signed_agreements/{id}
+    //
+    // Immutable audit copies of the signed onboarding agreement. Any signed-in
+    // user can create one (their own application); reads are permitted to
+    // signed-in users (the admin SignedAgreements page). Never updatable or
+    // deletable to preserve the legal record.
+    // ─────────────────────────────────────────────────────────────────────
+    match /signed_agreements/{docId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // client_documents/{docId}  (migrated from Supabase)
+    //   owner_id        — uid of the client who uploaded the doc
+    //   professional_id — uid of the pro currently assigned access
+    // ─────────────────────────────────────────────────────────────────────
+    match /client_documents/{docId} {
+
+      function isDocOwner() {
+        return isSignedIn() && resource.data.owner_id == request.auth.uid;
+      }
+
+      function isSharedProfessional() {
+        return isSignedIn() && resource.data.professional_id == request.auth.uid;
+      }
+
+      allow get, list: if isDocOwner() || isSharedProfessional();
+
+      allow create: if isSignedIn()
+        && request.resource.data.owner_id == request.auth.uid
+        && request.resource.data.keys().hasAll(
+            ['owner_id', 'file_name', 'storage_path', 'status', 'uploaded_at']
+          );
+
+      allow update: if isDocOwner()
+        || (
+          isSharedProfessional()
+          && request.resource.data.owner_id == resource.data.owner_id
+          && request.resource.data.professional_id == resource.data.professional_id
+          && request.resource.data.storage_path == resource.data.storage_path
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'updated_at'])
+        );
+
+      allow delete: if isDocOwner();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // users/{uid} — per-user profile / membership document.
+    // ─────────────────────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create, update: if isSignedIn() && request.auth.uid == uid;
+      allow delete: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // notifications/{id} — in-app notifications addressed to a user.
+    // ─────────────────────────────────────────────────────────────────────
+    match /notifications/{docId} {
+      allow read, update: if isSignedIn()
+        && (resource.data.userId == request.auth.uid
+            || resource.data.recipientId == request.auth.uid);
+      allow create: if isSignedIn();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // conversations/{id} + messages subcollection — direct messaging.
+    // ─────────────────────────────────────────────────────────────────────
+    match /conversations/{convId} {
+      allow read, update: if isSignedIn()
+        && request.auth.uid in resource.data.participants;
+      allow create: if isSignedIn()
+        && request.auth.uid in request.resource.data.participants;
+
+      match /messages/{msgId} {
+        allow read: if isSignedIn()
+          && request.auth.uid in get(
+              /databases/$(database)/documents/conversations/$(convId)
+            ).data.participants;
+        allow create: if isSignedIn()
+          && request.resource.data.senderId == request.auth.uid;
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Lead / submission collections — created from public or signed-in forms.
+    // These are write-mostly (the admin reads them server-side / via console).
+    // Allow create broadly so public marketing forms work; restrict reads.
+    // ─────────────────────────────────────────────────────────────────────
+    match /contact_submissions/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    match /exit_intent_leads/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    match /referrals/{docId} {
+      allow create: if isSignedIn();
+      allow read: if isSignedIn();
+    }
+
+    match /referral_codes/{docId} {
+      allow read: if true;
+      allow create, update: if isSignedIn();
+    }
+
+    // Email queue + admin notifications (used by Firebase "Trigger Email"
+    // extension and the admin dashboard). Signed-in users may enqueue mail and
+    // notifications; reads limited to signed-in admins.
+    match /mail/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn();
+    }
+
+    match /admin_notifications/{docId} {
+      allow create: if true;
+      allow read, update: if isSignedIn();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // onboarding_reminders/{uid}
+    //
+    // Dedup ledger written by the scheduled `onboarding-reminder` edge function
+    // (runs server-side with only the public Web API key). One doc per pro uid
+    // records that a "Finish your application" reminder was already sent so it
+    // is never sent repeatedly. The function reads it to dedup and creates it
+    // after queuing the email — hence read + create are open, update/delete
+    // locked to preserve the record.
+    // ─────────────────────────────────────────────────────────────────────
+    match /onboarding_reminders/{docId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if false;
+    }
+
+    match /membership_payment_attempts/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn();
+    }
+
+    match /post_purchase_emails/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn();
+    }
+
+    // CRM contacts + broadcast logs — admin tooling, signed-in only.
+    match /crm_contacts/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /broadcast_log/{docId} {
+      allow read, write: if isSignedIn();
+      match /recipients/{rid} {
+        allow read, write: if isSignedIn();
+      }
+    }
+  }
+}

@@ -1,0 +1,164 @@
+import React, { useState } from 'react';
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { Search, MessageCircle, Users, Plus, Archive } from 'lucide-react';
+
+interface Conversation {
+  id: string;
+  title: string;
+  type: 'direct' | 'group' | 'case';
+  participants: string[];
+  lastMessage: string;
+  lastMessageAt: string;
+  unreadCount: number;
+  caseId?: string;
+  isActive: boolean;
+}
+
+interface ConversationListProps {
+  onSelectConversation: (conversation: Conversation) => void;
+  activeConversationId?: string;
+}
+
+export default function ConversationList({ onSelectConversation, activeConversationId }: ConversationListProps) {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [filter, setFilter] = useState<'all' | 'direct' | 'group' | 'case'>('all');
+
+  const mockConversations: Conversation[] = [
+    {
+      id: '1',
+      title: 'Sarah Johnson - Tax Consultation',
+      type: 'direct',
+      participants: ['Sarah Johnson'],
+      lastMessage: 'Thank you for reviewing my documents',
+      lastMessageAt: '2 minutes ago',
+      unreadCount: 2,
+      isActive: true
+    },
+    {
+      id: '2',
+      title: 'Business Tax Case #2024-001',
+      type: 'case',
+      participants: ['Mike Chen', 'Lisa Wong', 'David Smith'],
+      lastMessage: 'Updated the depreciation schedule',
+      lastMessageAt: '15 minutes ago',
+      unreadCount: 0,
+      caseId: '2024-001',
+      isActive: true
+    },
+    {
+      id: '3',
+      title: 'Estate Planning Team',
+      type: 'group',
+      participants: ['Emma Davis', 'Robert Taylor', 'Jennifer Lee'],
+      lastMessage: 'Meeting scheduled for tomorrow',
+      lastMessageAt: '1 hour ago',
+      unreadCount: 1,
+      isActive: true
+    }
+  ];
+
+  const filteredConversations = mockConversations.filter(conv => {
+    const matchesSearch = conv.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                         conv.participants.some(p => p.toLowerCase().includes(searchQuery.toLowerCase()));
+    const matchesFilter = filter === 'all' || conv.type === filter;
+    return matchesSearch && matchesFilter && conv.isActive;
+  });
+
+  return (
+    <Card className="h-full">
+      <CardHeader className="pb-4">
+        <div className="flex items-center justify-between">
+          <CardTitle className="flex items-center gap-2">
+            <MessageCircle className="h-5 w-5" />
+            Messages
+          </CardTitle>
+          <Button size="sm" variant="outline">
+            <Plus className="h-4 w-4" />
+          </Button>
+        </div>
+        
+        <div className="space-y-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
+            <Input
+              placeholder="Search conversations..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+          
+          <div className="flex gap-2">
+            {(['all', 'direct', 'group', 'case'] as const).map((filterType) => (
+              <Button
+                key={filterType}
+                variant={filter === filterType ? 'default' : 'outline'}
+                size="sm"
+                onClick={() => setFilter(filterType)}
+                className="capitalize"
+              >
+                {filterType}
+              </Button>
+            ))}
+          </div>
+        </div>
+      </CardHeader>
+
+      <CardContent className="p-0">
+        <div className="space-y-1 max-h-96 overflow-y-auto">
+          {filteredConversations.map((conversation) => (
+            <div
+              key={conversation.id}
+              className={`p-4 cursor-pointer hover:bg-gray-50 border-b transition-colors ${
+                activeConversationId === conversation.id ? 'bg-blue-50 border-l-4 border-l-blue-500' : ''
+              }`}
+              onClick={() => onSelectConversation(conversation)}
+            >
+              <div className="flex items-start justify-between">
+                <div className="flex items-start gap-3 flex-1">
+                  <Avatar className="h-10 w-10">
+                    <AvatarFallback>
+                      {conversation.type === 'group' ? <Users className="h-5 w-5" /> : 
+                       conversation.title.charAt(0)}
+                    </AvatarFallback>
+                  </Avatar>
+                  
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <h4 className="font-medium text-sm truncate">{conversation.title}</h4>
+                      {conversation.type === 'case' && (
+                        <Badge variant="secondary" className="text-xs">Case</Badge>
+                      )}
+                      {conversation.type === 'group' && (
+                        <Badge variant="outline" className="text-xs">Group</Badge>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-600 truncate">{conversation.lastMessage}</p>
+                    <div className="flex items-center justify-between mt-1">
+                      <span className="text-xs text-gray-500">{conversation.lastMessageAt}</span>
+                      {conversation.participants.length > 1 && (
+                        <span className="text-xs text-gray-500">
+                          {conversation.participants.length} participants
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+                
+                {conversation.unreadCount > 0 && (
+                  <Badge variant="destructive" className="ml-2">
+                    {conversation.unreadCount}
+                  </Badge>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
