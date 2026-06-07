@@ -1,6 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
-import { getProfessionals, matchesLocationQuery } from '@/services/professionalsService';
+import {
+  getProfessionals,
+  matchesLocationQuery,
+  SERVICE_CATEGORIES,
+  SERVICE_MODALITY_OPTIONS,
+  type ServiceModality,
+} from '@/services/professionalsService';
 import ProfessionalCard from '@/components/ProfessionalCard';
 import AdvancedFilters from '@/components/AdvancedFilters';
 import ProfessionalMapView from '@/components/ProfessionalMapView';
@@ -19,6 +25,12 @@ const FindProfessionals = () => {
   const [searchTerm, setSearchTerm] = useState(searchParams.get('search') || '');
   const [locationFilter, setLocationFilter] = useState(searchParams.get('location') || '');
   const [specialtyFilter, setSpecialtyFilter] = useState('');
+  const [modalityFilter, setModalityFilter] = useState<ServiceModality | 'all'>(
+    (searchParams.get('modality') as ServiceModality) || 'all'
+  );
+  const [categoryFilters, setCategoryFilters] = useState<string[]>(
+    searchParams.get('category') ? [searchParams.get('category') as string] : []
+  );
   const [priceRange, setPriceRange] = useState<[number, number]>([50, 500]);
   const [experienceRange, setExperienceRange] = useState<[number, number]>([0, 40]);
   const [minRating, setMinRating] = useState(0);
@@ -50,25 +62,28 @@ const FindProfessionals = () => {
       setError(null);
       const data = await getProfessionals();
       const transformed = data.map((prof: any) => ({
-        id: prof.id, 
+        id: prof.id,
+        slug: prof.slug || '',
         name: prof.full_name,
         title: prof.specializations?.[0] || prof.business_name || 'Tax Professional',
         image: prof.profile_image_url || 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=400&h=400&fit=crop',
-        rating: prof.rating || 4.5, 
+        rating: prof.rating || 4.5,
         reviewCount: prof.review_count || 0,
         location: prof.location || 'United States',
         city: prof.city || '',
         state: prof.state || '',
         zip_code: prof.zip_code || '',
-        phone: prof.phone || '', 
+        phone: prof.phone || '',
         email: prof.email,
-        specialties: prof.specializations || prof.services || [], 
+        specialties: prof.specializations || prof.services || [],
         experience: prof.years_experience || 5,
-        description: prof.bio || 'Experienced tax professional ready to help with your tax needs.', 
+        description: prof.bio || 'Experienced tax professional ready to help with your tax needs.',
         certifications: prof.credentials?.certifications || [],
-        hourlyRate: prof.pricing?.hourlyRate || 150, 
+        hourlyRate: prof.pricing?.hourlyRate || 150,
         category: 'cpa',
-        services: prof.services || [], 
+        services: prof.services || [],
+        serviceCategories: prof.service_categories || [],
+        serviceModality: (prof.service_modality as ServiceModality) || 'both',
         membershipLevel: prof.membership_level,
       }));
       setProfessionals(transformed);
@@ -125,12 +140,21 @@ const FindProfessionals = () => {
 
     const matchesSpecialty = !specialtyFilter || specialtyFilter === 'all' ||
       prof.specialties?.includes(specialtyFilter);
+    // Virtual / in-person filter. A pro set to 'both' always matches; an
+    // explicit virtual/in_person filter matches that exact modality OR 'both'.
+    const matchesModality = modalityFilter === 'all' ||
+      prof.serviceModality === modalityFilter ||
+      prof.serviceModality === 'both';
+    // Service-category taxonomy filter (any selected category matches).
+    const matchesCategories = categoryFilters.length === 0 ||
+      categoryFilters.some((c) => prof.serviceCategories?.includes(c));
     const matchesPrice = prof.hourlyRate >= priceRange[0] && prof.hourlyRate <= priceRange[1];
     const matchesExperience = prof.experience >= experienceRange[0] && prof.experience <= experienceRange[1];
     const matchesRating = prof.rating >= minRating;
-    const matchesCertifications = certifications.length === 0 || 
+    const matchesCertifications = certifications.length === 0 ||
       certifications.some(cert => prof.certifications?.includes(cert));
-    return matchesSearch && matchesLocation && matchesSpecialty && matchesPrice && 
+    return matchesSearch && matchesLocation && matchesSpecialty && matchesModality &&
+           matchesCategories && matchesPrice &&
            matchesExperience && matchesRating && matchesCertifications;
   });
 
@@ -147,19 +171,28 @@ const FindProfessionals = () => {
     }
   });
 
+  const toggleCategory = (value: string) => {
+    setCategoryFilters((prev) =>
+      prev.includes(value) ? prev.filter((c) => c !== value) : [...prev, value]
+    );
+  };
+
   const resetFilters = () => {
     setSearchTerm('');
     setLocationFilter('');
     setSpecialtyFilter('');
-    setPriceRange([50, 500]); 
-    setExperienceRange([0, 40]); 
+    setModalityFilter('all');
+    setCategoryFilters([]);
+    setPriceRange([50, 500]);
+    setExperienceRange([0, 40]);
     setMinRating(0);
-    setAvailability([]); 
-    setCertifications([]); 
+    setAvailability([]);
+    setCertifications([]);
     setSortBy('rating');
   };
 
-  const hasActiveFilters = searchTerm || locationFilter || specialtyFilter || 
+  const hasActiveFilters = searchTerm || locationFilter || specialtyFilter ||
+    modalityFilter !== 'all' || categoryFilters.length > 0 ||
     priceRange[0] !== 50 || priceRange[1] !== 500 || minRating !== 0 ||
     certifications.length > 0;
 
@@ -224,29 +257,43 @@ const FindProfessionals = () => {
           {/* Quick Filters */}
           <div className="flex flex-wrap items-center gap-2 mt-4 pt-4 border-t border-gray-100">
             <span className="text-sm text-gray-500">Quick filters:</span>
-            <Button 
-              variant={minRating >= 4.5 ? "default" : "outline"} 
+            <Button
+              variant={minRating >= 4.5 ? "default" : "outline"}
               size="sm"
               onClick={() => setMinRating(minRating >= 4.5 ? 0 : 4.5)}
             >
               Top Rated (4.5+)
             </Button>
-            <Button 
-              variant={experienceRange[0] >= 10 ? "default" : "outline"} 
+            <Button
+              variant={experienceRange[0] >= 10 ? "default" : "outline"}
               size="sm"
               onClick={() => setExperienceRange(experienceRange[0] >= 10 ? [0, 40] : [10, 40])}
             >
               10+ Years Experience
             </Button>
-            <Button 
-              variant={priceRange[1] <= 150 ? "default" : "outline"} 
+            <Button
+              variant={priceRange[1] <= 150 ? "default" : "outline"}
               size="sm"
               onClick={() => setPriceRange(priceRange[1] <= 150 ? [50, 500] : [50, 150])}
             >
               Budget Friendly
             </Button>
-            <Button 
-              variant="outline" 
+
+            {/* Virtual / in-person modality */}
+            <Select value={modalityFilter} onValueChange={(v) => setModalityFilter(v as ServiceModality | 'all')}>
+              <SelectTrigger className="h-9 w-auto min-w-[150px]">
+                <SelectValue placeholder="How they work" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">Virtual or In-person</SelectItem>
+                {SERVICE_MODALITY_OPTIONS.map((m) => (
+                  <SelectItem key={m.value} value={m.value}>{m.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            <Button
+              variant="outline"
               size="sm"
               onClick={() => setFiltersOpen(!filtersOpen)}
               className="ml-auto"
@@ -254,6 +301,28 @@ const FindProfessionals = () => {
               <Filter className="mr-2 h-4 w-4" />
               Advanced Filters
             </Button>
+          </div>
+
+          {/* Service-category taxonomy chips */}
+          <div className="flex flex-wrap items-center gap-2 mt-3">
+            <span className="text-sm text-gray-500">Services:</span>
+            {SERVICE_CATEGORIES.map((cat) => {
+              const active = categoryFilters.includes(cat.value);
+              return (
+                <button
+                  key={cat.value}
+                  type="button"
+                  onClick={() => toggleCategory(cat.value)}
+                  className={`rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+                    active
+                      ? 'border-blue-600 bg-blue-600 text-white'
+                      : 'border-gray-200 bg-white text-gray-600 hover:border-blue-300 hover:text-blue-700'
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
@@ -305,6 +374,18 @@ const FindProfessionals = () => {
                 <X className="h-3 w-3 cursor-pointer" onClick={() => setMinRating(0)} />
               </Badge>
             )}
+            {modalityFilter !== 'all' && (
+              <Badge variant="secondary" className="flex items-center gap-1">
+                {SERVICE_MODALITY_OPTIONS.find((m) => m.value === modalityFilter)?.label || modalityFilter}
+                <X className="h-3 w-3 cursor-pointer" onClick={() => setModalityFilter('all')} />
+              </Badge>
+            )}
+            {categoryFilters.map((c) => (
+              <Badge key={c} variant="secondary" className="flex items-center gap-1">
+                {SERVICE_CATEGORIES.find((sc) => sc.value === c)?.label || c}
+                <X className="h-3 w-3 cursor-pointer" onClick={() => toggleCategory(c)} />
+              </Badge>
+            ))}
             <Button variant="ghost" size="sm" onClick={resetFilters} className="text-red-600 hover:text-red-700">
               Clear All
             </Button>
@@ -414,7 +495,10 @@ const FindProfessionals = () => {
                     zip_code: p.zip_code,
                     location: p.location,
                   }))}
-                  onViewProfile={(id) => navigate(`/professional/${id}`)}
+                  onViewProfile={(id) => {
+                    const p = sorted.find((x) => x.id === id);
+                    navigate(p?.slug ? `/preparer/${p.slug}` : `/professional/${id}`);
+                  }}
                 />
               )
             ) : (

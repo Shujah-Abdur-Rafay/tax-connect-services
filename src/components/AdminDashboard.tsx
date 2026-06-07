@@ -5,12 +5,16 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { Search, Eye, Filter, Loader2, Users, FileText, Crown } from 'lucide-react';
+import { Search, Eye, Filter, Loader2, Users, FileText, Crown, CreditCard, Star, TrendingUp, Wrench } from 'lucide-react';
 import { ApplicationReview } from './ApplicationReview';
 import { ProfessionalListingManager } from './ProfessionalListingManager';
 import { UserMembershipManager } from './UserMembershipManager';
 import { AdminNotificationsBadge } from './AdminNotificationsBadge';
 import { getAllApplications } from '@/services/enrollmentService';
+import AdminSubscriptionsManager from './admin/AdminSubscriptionsManager';
+import AdminReviewModeration from './admin/AdminReviewModeration';
+import AdminPayoutsMonitor from './admin/AdminPayoutsMonitor';
+import AdminToolsGrid from './admin/AdminToolsGrid';
 
 
 
@@ -114,7 +118,7 @@ export function AdminDashboard() {
 
 
       <Tabs defaultValue="applications" className="space-y-6">
-        <TabsList>
+        <TabsList className="flex w-full flex-wrap justify-start">
           <TabsTrigger value="applications" className="flex items-center gap-2">
             <FileText className="h-4 w-4" />
             Applications
@@ -126,6 +130,22 @@ export function AdminDashboard() {
           <TabsTrigger value="memberships" className="flex items-center gap-2">
             <Crown className="h-4 w-4" />
             Memberships
+          </TabsTrigger>
+          <TabsTrigger value="subscriptions" className="flex items-center gap-2">
+            <CreditCard className="h-4 w-4" />
+            Subscriptions
+          </TabsTrigger>
+          <TabsTrigger value="payouts" className="flex items-center gap-2">
+            <TrendingUp className="h-4 w-4" />
+            Payouts
+          </TabsTrigger>
+          <TabsTrigger value="reviews" className="flex items-center gap-2">
+            <Star className="h-4 w-4" />
+            Reviews
+          </TabsTrigger>
+          <TabsTrigger value="tools" className="flex items-center gap-2">
+            <Wrench className="h-4 w-4" />
+            Tools
           </TabsTrigger>
         </TabsList>
 
@@ -215,6 +235,22 @@ export function AdminDashboard() {
 
         <TabsContent value="memberships">
           <UserMembershipManager />
+        </TabsContent>
+
+        <TabsContent value="subscriptions">
+          <AdminSubscriptionsManager />
+        </TabsContent>
+
+        <TabsContent value="payouts">
+          <AdminPayoutsMonitor />
+        </TabsContent>
+
+        <TabsContent value="reviews">
+          <AdminReviewModeration />
+        </TabsContent>
+
+        <TabsContent value="tools">
+          <AdminToolsGrid />
         </TabsContent>
       </Tabs>
     </div>

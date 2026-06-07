@@ -37,6 +37,8 @@ import {
   queueFirebaseEmail,
   buildBrandedEmail,
 } from '@/services/firebaseEmailService';
+import { ensureProfessionalSlug } from '@/services/professionalsService';
+import ShareableProfileLink from '@/components/ShareableProfileLink';
 
 import { useToast } from '@/hooks/use-toast';
 
@@ -75,6 +77,9 @@ export default function TaxProfessionalOnboarding() {
   const { toast } = useToast();
   const [currentStep, setCurrentStep] = useState(1);
   const [isComplete, setIsComplete] = useState(false);
+  // The pro's public-profile slug, resolved on completion so we can show them
+  // their shareable /preparer/{slug} landing-page link.
+  const [profileSlug, setProfileSlug] = useState<string | null>(null);
   // Holds the signed agreement after step 6 so the payment step (step 7) can
   // reuse the signer's verified name/email for the PaymentIntent + receipt.
   const [signedAgreement, setSignedAgreement] = useState<SignedAgreement | null>(null);
@@ -311,6 +316,20 @@ export default function TaxProfessionalOnboarding() {
       }
     }
   }, [user, currentStep, showVerificationPending, isExistingProfessional]);
+
+  // Once onboarding completes, resolve (or backfill) the pro's profile slug so
+  // the success screen can show their shareable landing-page link.
+  useEffect(() => {
+    if (!isComplete || !user?.uid) return;
+    let cancelled = false;
+    (async () => {
+      const slug = await ensureProfessionalSlug(user.uid, user.name);
+      if (!cancelled) setProfileSlug(slug);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [isComplete, user]);
 
   /**
    * Persist the current onboarding step + partially-entered data to the
@@ -1041,6 +1060,24 @@ export default function TaxProfessionalOnboarding() {
                   </>
                 )}
               </p>
+
+              {/* Shareable public profile link — start marketing immediately. */}
+              {(profileSlug || user?.uid) && (
+                <div className="mb-6 rounded-lg border border-blue-200 bg-blue-50 p-4 text-left">
+                  <p className="mb-1 text-sm font-semibold text-blue-900">
+                    🎉 Your public profile is live — share it to start getting clients:
+                  </p>
+                  <p className="mb-3 text-xs text-blue-800">
+                    Add this link to your email signature, social bios, and business cards.
+                  </p>
+                  <ShareableProfileLink
+                    slug={profileSlug}
+                    professionalId={user?.uid}
+                    label=""
+                  />
+                </div>
+              )}
+
               <Button onClick={() => window.location.href = '/'}>Return to Home</Button>
             </CardContent>
           </Card>

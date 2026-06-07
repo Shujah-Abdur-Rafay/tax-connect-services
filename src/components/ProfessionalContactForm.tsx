@@ -17,7 +17,6 @@ import { useToast } from '@/hooks/use-toast';
 import { submitContactForm } from '@/services/contactFormService';
 import { createConversationFromContactSubmission } from '@/services/messagingService';
 import { useAuth } from '@/contexts/AuthContext';
-import { supabase } from '@/lib/supabase';
 import { queueFirebaseEmail, buildBrandedEmail } from '@/services/firebaseEmailService';
 
 
@@ -225,12 +224,10 @@ const ProfessionalContactForm: React.FC<ProfessionalContactFormProps> = ({
       //    actually find out about the inquiry (separately from in-portal
       //    messaging). We don't block the user flow if this fails.
       //
-      // We fire TWO independent paths in parallel so a single failure (e.g.
-      // Supabase project paused, edge function not deployed) doesn't silently
-      // swallow the notification:
-      //   a) Supabase edge function `send-professional-inquiry` (Gmail SMTP)
-      //   b) Firestore `mail` queue, consumed by the Firebase Trigger Email
-      //      extension. This works even when Supabase is INACTIVE.
+      //    Delivery goes through the Firestore `mail` queue, consumed by the
+      //    Firebase Trigger Email extension. (The old Supabase
+      //    `send-professional-inquiry` edge function was removed along with
+      //    Supabase — the mail queue is now the single notification path.)
       if (professionalEmail) {
         const portalUrl =
           typeof window !== 'undefined'
@@ -245,39 +242,7 @@ const ProfessionalContactForm: React.FC<ProfessionalContactFormProps> = ({
           findLabel(CONTACT_METHOD_OPTIONS, formData.preferredContact) ||
           formData.preferredContact;
 
-        // (a) Supabase edge function — keep, but don't depend on it.
-        try {
-          const { error: fnError } = await supabase.functions.invoke(
-            'send-professional-inquiry',
-            {
-              body: {
-                professionalEmail,
-                professionalName,
-                clientName: formData.name,
-                clientEmail: formData.email,
-                clientPhone: formData.phone,
-                serviceType: serviceLabel,
-                preferredContact: preferredLabel,
-                message: formData.message,
-                conversationId: createdConversationId,
-                portalUrl,
-              },
-            },
-          );
-          if (fnError) {
-            console.warn(
-              '[ProfessionalContactForm] Supabase send-professional-inquiry failed:',
-              fnError.message,
-            );
-          }
-        } catch (emailErr) {
-          console.warn(
-            '[ProfessionalContactForm] Supabase send-professional-inquiry threw:',
-            (emailErr as Error).message,
-          );
-        }
-
-        // (b) Firebase `mail` queue fallback — always runs.
+        // Firebase `mail` queue → Trigger Email extension.
         try {
           const html = buildBrandedEmail({
             title: `New client inquiry from ${formData.name}`,

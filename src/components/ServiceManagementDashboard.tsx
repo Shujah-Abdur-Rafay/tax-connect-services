@@ -8,7 +8,8 @@ import { Input } from '@/components/ui/input';
 import { GripVertical, Plus, Edit, Trash2, DollarSign, Search, Tag } from 'lucide-react';
 import { ServiceFormModal } from './ServiceFormModal';
 import { BulkPricingModal } from './BulkPricingModal';
-import { supabase } from '@/lib/supabase';
+import { doc, getDoc, updateDoc, serverTimestamp } from 'firebase/firestore';
+import { db } from '@/lib/firebase';
 import { useToast } from '@/hooks/use-toast';
 
 export interface Service {
@@ -43,18 +44,23 @@ export const ServiceManagementDashboard = ({ professionalId }: { professionalId:
   }, [services, searchTerm, selectedCategory]);
 
   const fetchServices = async () => {
-    const { data, error } = await supabase
-      .from('professionals')
-      .select('services')
-      .eq('id', professionalId)
-      .single();
-
-    if (error) {
+    if (!db || !professionalId) return;
+    try {
+      const snap = await getDoc(doc(db, 'professionals', professionalId));
+      const data = snap.exists() ? (snap.data() as Record<string, unknown>) : {};
+      // The pro's structured service list lives on their professionals/{uid}
+      // doc as a `services` array. Older docs may store a plain string[] of
+      // service names, so guard against the legacy shape.
+      const raw = data?.services;
+      setServices(
+        Array.isArray(raw) && raw.every((s) => s && typeof s === 'object')
+          ? (raw as Service[])
+          : [],
+      );
+    } catch (error) {
+      console.error('[ServiceManagementDashboard] load failed:', error);
       toast({ title: 'Error', description: 'Failed to load services', variant: 'destructive' });
-      return;
     }
-
-    setServices(data?.services || []);
   };
 
   const filterServices = () => {
@@ -75,12 +81,14 @@ export const ServiceManagementDashboard = ({ professionalId }: { professionalId:
   };
 
   const saveServices = async (updatedServices: Service[]) => {
-    const { error } = await supabase
-      .from('professionals')
-      .update({ services: updatedServices })
-      .eq('id', professionalId);
-
-    if (error) {
+    if (!db || !professionalId) return false;
+    try {
+      await updateDoc(doc(db, 'professionals', professionalId), {
+        services: updatedServices,
+        updated_at: serverTimestamp(),
+      });
+    } catch (error) {
+      console.error('[ServiceManagementDashboard] save failed:', error);
       toast({ title: 'Error', description: 'Failed to save services', variant: 'destructive' });
       return false;
     }

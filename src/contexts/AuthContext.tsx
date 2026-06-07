@@ -10,6 +10,7 @@ import {
 import { auth, db } from '@/lib/firebase';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { sendVerificationEmail } from '@/services/emailVerificationService';
+import { createProfessionalListing } from '@/services/professionalsService';
 import { MembershipLevel } from '@/constants/membershipLevels';
 
 
@@ -177,9 +178,30 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       name,
       email,
       role,
+      // A brand-new professional starts on the free Directory Listing tier so
+      // their auto-created public profile is immediately live.
+      ...(role === 'professional'
+        ? { membershipLevel: MembershipLevel.DIRECTORY_LISTING }
+        : {}),
       createdAt: new Date().toISOString(),
       emailVerified: false
     });
+
+    // LAUNCH-CRITICAL: the moment a professional registers, create their free
+    // Directory Listing profile + shareable /preparer/{slug} landing page.
+    // Best-effort — a failure here must never block account creation (the
+    // profileSyncQueue + onboarding will reconcile it on next load).
+    if (role === 'professional') {
+      try {
+        await createProfessionalListing({
+          uid: userCredential.user.uid,
+          name,
+          email,
+        });
+      } catch (listingErr) {
+        console.warn('[register] auto-create professional listing failed (non-fatal):', listingErr);
+      }
+    }
 
     // Send verification email for professional accounts
     if (role === 'professional') {

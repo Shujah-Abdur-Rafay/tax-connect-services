@@ -25,6 +25,8 @@ import {
   Inbox,
   FolderOpen,
   Banknote,
+  Briefcase,
+  Library,
   Settings,
   LogOut,
 } from 'lucide-react';
@@ -146,6 +148,12 @@ const Header: React.FC<HeaderProps> = ({ onToggleNotifications, openLoginDialog 
                       <UserCircle className="mr-2 h-4 w-4" />
                       <span>Member Portal</span>
                     </DropdownMenuItem>
+                    {!isProfessional && !isAdmin && (
+                      <DropdownMenuItem onClick={() => navigate('/dashboard')}>
+                        <LayoutDashboard className="mr-2 h-4 w-4" />
+                        <span>My Dashboard</span>
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuItem onClick={() => navigate('/my-orders')}>
                       <ShoppingBag className="mr-2 h-4 w-4" />
                       <span>My Orders</span>
@@ -157,8 +165,12 @@ const Header: React.FC<HeaderProps> = ({ onToggleNotifications, openLoginDialog 
 
                     {isProfessional && (
                       <>
-                        <DropdownMenuItem onClick={() => navigate('/pro/gigs')}>
+                        <DropdownMenuItem onClick={() => navigate('/pro/dashboard')}>
                           <LayoutDashboard className="mr-2 h-4 w-4" />
+                          <span>Pro Dashboard</span>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => navigate('/pro/gigs')}>
+                          <Briefcase className="mr-2 h-4 w-4" />
                           <span>My Gigs</span>
                         </DropdownMenuItem>
                         <DropdownMenuItem onClick={() => navigate('/pro/orders')}>
@@ -178,11 +190,16 @@ const Header: React.FC<HeaderProps> = ({ onToggleNotifications, openLoginDialog 
 
 
                     {isAdmin && (
-                      <DropdownMenuItem onClick={() => navigate('/admin')}>
-
-                        <Settings className="mr-2 h-4 w-4" />
-                        <span>Admin Panel</span>
-                      </DropdownMenuItem>
+                      <>
+                        <DropdownMenuItem onClick={() => navigate('/admin')}>
+                          <Settings className="mr-2 h-4 w-4" />
+                          <span>Admin Panel</span>
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => navigate('/admin/resources')}>
+                          <Library className="mr-2 h-4 w-4" />
+                          <span>Resource Center</span>
+                        </DropdownMenuItem>
+                      </>
                     )}
 
 

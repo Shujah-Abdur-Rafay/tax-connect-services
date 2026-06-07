@@ -5,7 +5,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card } from '@/components/ui/card';
-import { supabase } from '@/lib/supabase';
+import { submitReview } from '@/services/reviewsService';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 
@@ -41,20 +41,17 @@ export function ReviewSubmissionForm({ professionalId, professionalName, onSucce
     setIsSubmitting(true);
 
     try {
-      const { error } = await supabase.from('reviews').insert({
-        professional_id: professionalId,
-        client_id: user.uid,
-        client_name: user.displayName || 'Anonymous',
-        client_email: user.email || '',
+      await submitReview({
+        professionalId,
+        clientId: user.uid,
+        clientName: user.name || 'Anonymous',
+        clientEmail: user.email || '',
         rating,
         title,
-        review_text: reviewText,
-        service_type: serviceType || null,
-        service_date: serviceDate || null,
-        is_verified: true
+        reviewText,
+        serviceType: serviceType || undefined,
+        serviceDate: serviceDate || undefined,
       });
-
-      if (error) throw error;
 
       toast.success('Review submitted successfully!');
       setRating(0);

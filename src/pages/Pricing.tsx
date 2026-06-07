@@ -15,6 +15,7 @@ import EarningsCalculator from '@/components/EarningsCalculator';
 import { validatePromoCode, type ValidatePromoResult } from '@/services/promoCodeService';
 import { type MembershipTier } from '@/services/membershipCheckoutService';
 import MembershipPaymentDialog from '@/components/MembershipPaymentDialog';
+import SubscriptionBilling from '@/components/pro/SubscriptionBilling';
 
 
 type TierKey = MembershipTier;
@@ -28,7 +29,7 @@ interface Tier {
   compensation: string;
   requirements: string;
   primaryRole: string;
-  highlight?: 'popular' | 'vip';
+  highlight?: 'popular' | 'vip' | 'bureau';
   benefits: string[];
 }
 
@@ -84,6 +85,24 @@ const TIERS: Tier[] = [
       'Professional Tax Software (Retails for $1,495.00)',
     ],
   },
+  {
+    key: 'service_bureau',
+    name: 'Service Bureau Partner',
+    tagline: 'Run a multi-preparer office or franchise',
+    price: 1499.95,
+    priceLabel: '$1,499.95',
+    compensation: 'Override on every return your network files',
+    requirements: 'EFIN required, established office',
+    primaryRole: 'Operate & grow a preparer network',
+    highlight: 'bureau',
+    benefits: [
+      'Everything in Premier Partner',
+      'Preparer-network management — invite & manage sub-preparers',
+      'Advanced cross-network earnings & production reporting',
+      'Office / franchise admin tools',
+      'Priority partner support & dedicated onboarding',
+    ],
+  },
 ];
 
 const COMPARISON_FEATURES: {
@@ -91,19 +110,22 @@ const COMPARISON_FEATURES: {
   associate: string | boolean;
   professional: string | boolean;
   premier: string | boolean;
+  service_bureau: string | boolean;
 }[] = [
-  { label: 'Upgrade Fee', associate: '$99.95', professional: '$299.95', premier: '$499.95' },
-  { label: 'Per-Return Compensation', associate: '$100 flat', professional: '$240 – $1,200', premier: '100% of fees' },
-  { label: 'Approx. Revenue Share', associate: 'Flat fee', professional: '~80%', premier: '100%' },
-  { label: 'PTIN Required', associate: true, professional: true, premier: true },
-  { label: 'EFIN Required', associate: false, professional: false, premier: true },
-  { label: 'Experience Required', associate: 'None', professional: '1+ years', premier: '2+ years' },
-  { label: 'Tax Preparation Certification', associate: true, professional: true, premier: true },
-  { label: 'Complete Marketing Kit', associate: true, professional: true, premier: true },
-  { label: 'Professional Tax Software (Retails for $1,495.00)', associate: true, professional: true, premier: true },
-  { label: 'IRS AFSP Accreditation (18 CPE)', associate: false, professional: true, premier: true },
-  { label: 'Build Your Own Team', associate: false, professional: false, premier: true },
-  { label: 'Priority Lead Routing', associate: false, professional: true, premier: true },
+  { label: 'Upgrade Fee', associate: '$99.95', professional: '$299.95', premier: '$499.95', service_bureau: '$1,499.95' },
+  { label: 'Per-Return Compensation', associate: '$100 flat', professional: '$240 – $1,200', premier: '100% of fees', service_bureau: '100% + network override' },
+  { label: 'Approx. Revenue Share', associate: 'Flat fee', professional: '~80%', premier: '100%', service_bureau: '100% + override' },
+  { label: 'PTIN Required', associate: true, professional: true, premier: true, service_bureau: true },
+  { label: 'EFIN Required', associate: false, professional: false, premier: true, service_bureau: true },
+  { label: 'Experience Required', associate: 'None', professional: '1+ years', premier: '2+ years', service_bureau: 'Established office' },
+  { label: 'Tax Preparation Certification', associate: true, professional: true, premier: true, service_bureau: true },
+  { label: 'Complete Marketing Kit', associate: true, professional: true, premier: true, service_bureau: true },
+  { label: 'Professional Tax Software (Retails for $1,495.00)', associate: true, professional: true, premier: true, service_bureau: true },
+  { label: 'IRS AFSP Accreditation (18 CPE)', associate: false, professional: true, premier: true, service_bureau: true },
+  { label: 'Build Your Own Team', associate: false, professional: false, premier: true, service_bureau: true },
+  { label: 'Priority Lead Routing', associate: false, professional: true, premier: true, service_bureau: true },
+  { label: 'Preparer-Network Management', associate: false, professional: false, premier: false, service_bureau: true },
+  { label: 'Advanced Network Reporting', associate: false, professional: false, premier: false, service_bureau: true },
 ];
 
 const FAQS = [
@@ -210,8 +232,8 @@ const Pricing: React.FC = () => {
               Choose the Tier That Fits Your Practice
             </h1>
             <p className="text-xl text-gray-600 max-w-3xl mx-auto">
-              Three flexible membership tiers — each designed to help tax professionals at every
-              stage earn more, work smarter, and grow faster.
+              Four flexible membership tiers — each designed to help tax professionals at every
+              stage earn more, work smarter, and grow into a full service bureau.
             </p>
           </div>
 
@@ -275,17 +297,18 @@ const Pricing: React.FC = () => {
           </div>
 
           {/* Tier Cards */}
-          <div id="tiers" className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-16">
+          <div id="tiers" className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 mb-16">
             {TIERS.map((tier) => {
               const isPopular = tier.highlight === 'popular';
               const isVip = tier.highlight === 'vip';
+              const isBureau = tier.highlight === 'bureau';
               const finalPrice = Math.max(0, tier.price - discount);
               return (
                 <div
                   key={tier.key}
                   className={`relative bg-white rounded-2xl shadow-lg p-8 flex flex-col transition-transform hover:-translate-y-1 ${
                     isPopular ? 'border-2 border-blue-500 ring-4 ring-blue-100' : ''
-                  } ${isVip ? 'border-2' : ''}`}
+                  } ${isVip ? 'border-2' : ''} ${isBureau ? 'border-2 border-emerald-500 ring-4 ring-emerald-50' : ''}`}
                   style={isVip ? { borderColor: '#FFD700' } : undefined}
                 >
                   {isPopular && (
@@ -300,6 +323,13 @@ const Pricing: React.FC = () => {
                       <span className="bg-gradient-to-r from-yellow-400 to-yellow-600 text-white text-sm font-semibold px-4 py-1 rounded-full shadow flex items-center gap-1">
                         <Star className="h-4 w-4 fill-current" />
                         VIP
+                      </span>
+                    </div>
+                  )}
+                  {isBureau && (
+                    <div className="absolute -top-4 left-1/2 -translate-x-1/2">
+                      <span className="bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-semibold px-4 py-1 rounded-full shadow whitespace-nowrap">
+                        Enterprise
                       </span>
                     </div>
                   )}
@@ -362,6 +392,8 @@ const Pricing: React.FC = () => {
                         ? 'bg-blue-600 hover:bg-blue-700'
                         : isVip
                         ? 'bg-gradient-to-r from-yellow-500 to-yellow-600 hover:from-yellow-600 hover:to-yellow-700'
+                        : isBureau
+                        ? 'bg-gradient-to-r from-emerald-500 to-teal-600 hover:from-emerald-600 hover:to-teal-700'
                         : ''
                     }`}
                   >
@@ -380,6 +412,20 @@ const Pricing: React.FC = () => {
           </div>
 
 
+          {/* Prefer automatic renewal? — recurring subscription path (Phase 4) */}
+          {user && (
+            <div className="max-w-3xl mx-auto mb-16">
+              <div className="text-center mb-4">
+                <h2 className="text-2xl font-bold text-gray-900">Prefer automatic renewal?</h2>
+                <p className="text-gray-600 mt-1">
+                  Subscribe and your membership renews each year automatically — manage or cancel
+                  anytime from the Stripe customer portal.
+                </p>
+              </div>
+              <SubscriptionBilling />
+            </div>
+          )}
+
           {/* Earnings Calculator */}
           <EarningsCalculator />
 
@@ -389,7 +435,7 @@ const Pricing: React.FC = () => {
             <p className="text-center text-gray-600 mb-8">
               See exactly what's included with each tier
             </p>
-            <table className="w-full min-w-[640px]">
+            <table className="w-full min-w-[760px]">
               <thead>
                 <tr className="border-b-2 border-gray-200">
                   <th className="text-left py-4 px-4 text-gray-700 font-semibold">Feature</th>
@@ -402,6 +448,10 @@ const Pricing: React.FC = () => {
                     Premier Partner
                     <span className="block text-xs font-normal" style={{ color: '#B8860B' }}>VIP</span>
                   </th>
+                  <th className="text-center py-4 px-4 font-bold text-emerald-700">
+                    Service Bureau
+                    <span className="block text-xs font-normal text-emerald-600">Enterprise</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -411,6 +461,7 @@ const Pricing: React.FC = () => {
                     <td className="py-3 px-4 text-center">{renderCheck(row.associate)}</td>
                     <td className="py-3 px-4 text-center">{renderCheck(row.professional)}</td>
                     <td className="py-3 px-4 text-center">{renderCheck(row.premier)}</td>
+                    <td className="py-3 px-4 text-center">{renderCheck(row.service_bureau)}</td>
                   </tr>
                 ))}
               </tbody>

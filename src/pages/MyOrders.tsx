@@ -7,6 +7,9 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
 import OrderCard from '@/components/orders/OrderCard';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { ReviewSubmissionForm } from '@/components/ReviewSubmissionForm';
+import { getReviewsByClient } from '@/services/reviewsService';
 import {
   fetchOrdersForClient,
   updateOrderStatus,
@@ -27,6 +30,7 @@ import {
   DollarSign,
   ShieldCheck,
   Undo2,
+  Star,
 } from 'lucide-react';
 
 
@@ -49,12 +53,21 @@ const MyOrders: React.FC = () => {
   const [orders, setOrders] = useState<GigOrderRecord[]>([]);
   const [tab, setTab] = useState<'all' | GigOrderStatus>('all');
   const [verifying, setVerifying] = useState(false);
+  // Pro ids the client has already reviewed (so we show "Reviewed ✓" vs a prompt).
+  const [reviewedProIds, setReviewedProIds] = useState<Set<string>>(new Set());
+  const [reviewTarget, setReviewTarget] = useState<GigOrderRecord | null>(null);
 
   const load = async (uid: string) => {
     setLoading(true);
     try {
       const list = await fetchOrdersForClient(uid);
       setOrders(list);
+      try {
+        const myReviews = await getReviewsByClient(uid);
+        setReviewedProIds(new Set(myReviews.map((r) => r.professional_id)));
+      } catch {
+        /* non-fatal — review prompt just shows for all completed orders */
+      }
     } catch (e: any) {
       toast({
         title: 'Could not load your orders',
@@ -374,24 +387,71 @@ const MyOrders: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-4">
-                {filtered.map((o) => (
-                  <OrderCard
-                    key={o.id}
-                    order={o}
-                    perspective="client"
-                    onUpdateStatus={handleUpdate}
-                    onPayNow={handlePayNow}
-                    onRefund={handleRefund}
-                    onAddSourceFiles={handleAddSourceFiles}
-                    onRemoveSourceFile={handleRemoveSourceFile}
-                  />
-
-                ))}
+                {filtered.map((o) => {
+                  const canReview =
+                    (o.status === 'completed' || o.status === 'delivered') && !!o.pro_id;
+                  const alreadyReviewed = reviewedProIds.has(o.pro_id);
+                  return (
+                    <div key={o.id} className="space-y-2">
+                      <OrderCard
+                        order={o}
+                        perspective="client"
+                        onUpdateStatus={handleUpdate}
+                        onPayNow={handlePayNow}
+                        onRefund={handleRefund}
+                        onAddSourceFiles={handleAddSourceFiles}
+                        onRemoveSourceFile={handleRemoveSourceFile}
+                      />
+                      {canReview && (
+                        <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5">
+                          <div className="flex items-center gap-2 text-sm text-amber-900">
+                            <Star className="h-4 w-4 text-amber-500" />
+                            {alreadyReviewed
+                              ? `Thanks for reviewing ${o.pro_name || 'your pro'}!`
+                              : `How was working with ${o.pro_name || 'your pro'}?`}
+                          </div>
+                          {alreadyReviewed ? (
+                            <span className="text-xs font-medium text-green-700">Reviewed ✓</span>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="border-amber-300 text-amber-800 hover:bg-amber-100"
+                              onClick={() => setReviewTarget(o)}
+                            >
+                              <Star className="mr-1.5 h-4 w-4" />
+                              Leave a review
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </TabsContent>
         </Tabs>
       </section>
+
+      {/* Review-on-completion prompt (Phase 2) */}
+      <Dialog open={!!reviewTarget} onOpenChange={(open) => !open && setReviewTarget(null)}>
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Review your experience</DialogTitle>
+          </DialogHeader>
+          {reviewTarget && (
+            <ReviewSubmissionForm
+              professionalId={reviewTarget.pro_id}
+              professionalName={reviewTarget.pro_name || 'your tax pro'}
+              onSuccess={() => {
+                setReviewedProIds((prev) => new Set(prev).add(reviewTarget.pro_id));
+                setReviewTarget(null);
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </AppLayout>
   );
 };

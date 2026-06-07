@@ -28,6 +28,8 @@ import ProOrdersInbox from "./pages/ProOrdersInbox";
 import MyOrders from "./pages/MyOrders";
 import ProPayouts from "./pages/ProPayouts";
 import ProDocumentsInbox from "./pages/ProDocumentsInbox";
+import ProDashboard from "./pages/ProDashboard";
+import ClientDashboard from "./pages/ClientDashboard";
 
 
 import ProfessionalProfile from "./pages/ProfessionalProfile";
@@ -62,6 +64,7 @@ import PaymentSplitTest from "./pages/PaymentSplitTest";
 import AdminPlatformFees from "./pages/AdminPlatformFees";
 import AdminCrmContacts from "./pages/AdminCrmContacts";
 import AdminCrmBroadcast from "./pages/AdminCrmBroadcast";
+import AdminResources from "./pages/AdminResources";
 
 
 
@@ -101,13 +104,18 @@ const App = () => (
               <Route path="/pro/gigs" element={<ProGigsManager />} />
               <Route path="/pro/orders" element={<ProOrdersInbox />} />
               <Route path="/pro/documents" element={<ProDocumentsInbox />} />
+              <Route path="/pro/dashboard" element={<ProDashboard />} />
+              <Route path="/pro-dashboard" element={<ProDashboard />} />
               <Route path="/pro-payouts" element={<ProPayouts />} />
               <Route path="/pro/payouts" element={<ProPayouts />} />
               <Route path="/my-orders" element={<MyOrders />} />
+              <Route path="/client/dashboard" element={<ClientDashboard />} />
+              <Route path="/dashboard" element={<ClientDashboard />} />
 
 
 
 
+              <Route path="/preparer/:slug" element={<ProfessionalProfile />} />
               <Route path="/professional/:id" element={<ProfessionalProfile />} />
               <Route path="/member-portal" element={<MemberPortalPage />} />
               <Route path="/how-it-works" element={<HowItWorks />} />
@@ -147,6 +155,7 @@ const App = () => (
               <Route path="/admin/platform-fees" element={<AdminPlatformFees />} />
               <Route path="/admin/crm-contacts" element={<AdminCrmContacts />} />
               <Route path="/admin/crm-broadcast" element={<AdminCrmBroadcast />} />
+              <Route path="/admin/resources" element={<AdminResources />} />
               <Route path="/admin/stripe-health" element={<StripeHealth />} />
               <Route path="/stripe-health" element={<StripeHealth />} />
               <Route path="/admin/firestore-health" element={<FirestoreHealth />} />

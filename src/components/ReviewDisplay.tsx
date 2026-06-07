@@ -3,26 +3,17 @@ import { Star, ThumbsUp, ThumbsDown, CheckCircle, MessageSquare } from 'lucide-r
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { supabase } from '@/lib/supabase';
+import {
+  getReviewsForProfessional,
+  getUserVotes,
+  voteOnReview,
+  summarizeReviews,
+  type Review,
+  type ReviewVoteType,
+} from '@/services/reviewsService';
 import { useAuth } from '@/contexts/AuthContext';
 import { toast } from 'sonner';
 import { ReviewResponseForm } from './ReviewResponseForm';
-
-interface Review {
-  id: string;
-  client_name: string;
-  rating: number;
-  title: string;
-  review_text: string;
-  service_type: string | null;
-  service_date: string | null;
-  is_verified: boolean;
-  helpful_count: number;
-  not_helpful_count: number;
-  professional_response: string | null;
-  professional_response_date: string | null;
-  created_at: string;
-}
 
 interface ReviewDisplayProps {
   professionalId: string;
@@ -33,7 +24,7 @@ export function ReviewDisplay({ professionalId, isProfessionalView = false }: Re
   const { user } = useAuth();
   const [reviews, setReviews] = useState<Review[]>([]);
   const [loading, setLoading] = useState(true);
-  const [userVotes, setUserVotes] = useState<Record<string, string>>({});
+  const [userVotes, setUserVotes] = useState<Record<string, ReviewVoteType>>({});
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
 
   useEffect(() => {
@@ -43,14 +34,8 @@ export function ReviewDisplay({ professionalId, isProfessionalView = false }: Re
 
   const fetchReviews = async () => {
     try {
-      const { data, error } = await supabase
-        .from('reviews')
-        .select('*')
-        .eq('professional_id', professionalId)
-        .order('created_at', { ascending: false });
-
-      if (error) throw error;
-      setReviews(data || []);
+      const data = await getReviewsForProfessional(professionalId);
+      setReviews(data);
     } catch (error) {
       console.error('Error fetching reviews:', error);
     } finally {
@@ -60,58 +45,38 @@ export function ReviewDisplay({ professionalId, isProfessionalView = false }: Re
 
   const fetchUserVotes = async () => {
     if (!user) return;
-    
     try {
-      const { data, error } = await supabase
-        .from('review_votes')
-        .select('review_id, vote_type')
-        .eq('user_id', user.uid);
-
-      if (error) throw error;
-      
-      const votesMap: Record<string, string> = {};
-      data?.forEach(vote => {
-        votesMap[vote.review_id] = vote.vote_type;
-      });
-      setUserVotes(votesMap);
+      setUserVotes(await getUserVotes(user.uid));
     } catch (error) {
       console.error('Error fetching user votes:', error);
     }
   };
 
-  const handleVote = async (reviewId: string, voteType: 'helpful' | 'not_helpful') => {
+  const handleVote = async (reviewId: string, voteType: ReviewVoteType) => {
     if (!user) {
       toast.error('Please log in to vote');
       return;
     }
 
-    const currentVote = userVotes[reviewId];
-    
     try {
-      if (currentVote === voteType) {
-        await supabase.from('review_votes').delete().match({ review_id: reviewId, user_id: user.uid });
-        const newVotes = { ...userVotes };
+      const result = await voteOnReview(reviewId, user.uid, voteType);
+      const newVotes = { ...userVotes };
+      if (result === null) {
         delete newVotes[reviewId];
-        setUserVotes(newVotes);
       } else {
-        await supabase.from('review_votes').upsert({
-          review_id: reviewId,
-          user_id: user.uid,
-          vote_type: voteType
-        }, { onConflict: 'review_id,user_id' });
-        setUserVotes({ ...userVotes, [reviewId]: voteType });
+        newVotes[reviewId] = result;
       }
-      
-      fetchReviews();
+      setUserVotes(newVotes);
+      // Counts are recomputed server-side by the onReviewVoteWrite trigger;
+      // re-fetch shortly after so the helpful/not-helpful tallies refresh.
+      setTimeout(fetchReviews, 600);
     } catch (error) {
       console.error('Error voting:', error);
       toast.error('Failed to record vote');
     }
   };
 
-  const avgRating = reviews.length > 0 
-    ? (reviews.reduce((sum, r) => sum + r.rating, 0) / reviews.length).toFixed(1)
-    : '0.0';
+  const avgRating = summarizeReviews(reviews).average.toFixed(1);
 
   if (loading) return <div>Loading reviews...</div>;
 

@@ -21,6 +21,8 @@ interface Service {
 
 interface Professional {
   id: string;
+  /** Human-readable slug for the /preparer/{slug} landing page, if assigned. */
+  slug?: string;
   name: string;
   title: string;
   category: string;
@@ -104,7 +106,7 @@ const ProfessionalCard: React.FC<ProfessionalCardProps> = ({ professional }) => 
 
   return (
     <Card className="h-full hover:shadow-lg transition-shadow duration-200 cursor-pointer"
-      onClick={() => navigate(`/professional/${professional.id}`)}>
+      onClick={() => navigate(professional.slug ? `/preparer/${professional.slug}` : `/professional/${professional.id}`)}>
       <CardContent className="p-6">
         <div className="flex items-start gap-4 mb-4">
           <Avatar className="h-16 w-16">

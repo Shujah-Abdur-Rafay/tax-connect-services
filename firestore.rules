@@ -40,6 +40,14 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    // True when the signed-in user's `users/{uid}` doc has role == 'admin'.
+    // Used to gate admin-only writes (platform fees, promo-code management).
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // professionals/{uid}
     //
@@ -255,6 +263,178 @@ service cloud.firestore {
       match /recipients/{rid} {
         allow read, write: if isSignedIn();
       }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // gigs/{gigId} — fixed-price service packages published by a pro.
+    // Public read (the Tax Gigs marketplace lists them without auth); only the
+    // owning pro may create/update/delete their own gig.
+    // ─────────────────────────────────────────────────────────────────────
+    match /gigs/{gigId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.pro_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.pro_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // gig_orders/{orderId} — an order a client places against a pro's gig.
+    // Readable + updatable by the two parties on the order (client_uid /
+    // pro_id); a signed-in client creates the order for themselves. The Stripe
+    // webhook + refundGigOrder Cloud Functions write via the admin SDK, which
+    // bypasses these rules.
+    // ─────────────────────────────────────────────────────────────────────
+    match /gig_orders/{orderId} {
+      allow read: if isSignedIn()
+        && (resource.data.client_uid == request.auth.uid
+            || resource.data.pro_id == request.auth.uid
+            // Admins read every order for the payout / commission monitor.
+            || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.client_uid == request.auth.uid;
+      allow update: if isSignedIn()
+        && (resource.data.client_uid == request.auth.uid
+            || resource.data.pro_id == request.auth.uid);
+
+      // Source-doc / deliverable subcollections, if used per-order.
+      match /{sub}/{subDocId} {
+        allow read, write: if isSignedIn()
+          && (get(/databases/$(database)/documents/gig_orders/$(orderId)).data.client_uid == request.auth.uid
+              || get(/databases/$(database)/documents/gig_orders/$(orderId)).data.pro_id == request.auth.uid);
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // reviews/{reviewId} — client reviews of a professional (migrated off the
+    // old Supabase `reviews` table). Public read. The reviewing client creates
+    // and may edit/delete their own review; the reviewed professional may ONLY
+    // append a response (locked to the response fields). helpful_count /
+    // not_helpful_count are maintained by the onReviewVoteWrite Cloud Function
+    // (admin SDK, bypasses rules).
+    // ─────────────────────────────────────────────────────────────────────
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.client_id == request.auth.uid;
+      allow update: if isSignedIn()
+        && (
+          resource.data.client_id == request.auth.uid
+          || (
+            resource.data.professional_id == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['professional_response', 'professional_response_date', 'updated_at'])
+          )
+          // Admins moderate (e.g. hide) any review.
+          || isAdmin()
+        );
+      allow delete: if isSignedIn()
+        && (resource.data.client_id == request.auth.uid || isAdmin());
+    }
+
+    // review_votes/{reviewId}_{uid} — one helpful / not-helpful vote per user
+    // per review. A user manages only their own vote doc; the running tallies
+    // live on the review and are recomputed server-side.
+    match /review_votes/{voteId} {
+      allow read: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+      allow create, update: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid;
+      allow delete: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // platform_settings/{docId} — global knobs (e.g. fees.applicationFeePercent
+    // shown on every checkout). Public read; admin write only.
+    // ─────────────────────────────────────────────────────────────────────
+    match /platform_settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // resources/{docId} — Phase 3 Resource Center / Document Library.
+    //
+    // Admin-published training material, guides, compliance docs, marketing
+    // assets, video training, forms/checklists, and manuals. Metadata is
+    // readable by any signed-in user; the pro-facing library tier-gates each
+    // entry in the UI (a pro only sees download/open links for resources their
+    // membership tier unlocks). Only admins may create / update / delete.
+    // The backing files live in Storage under `resources/{id}/` (see
+    // FIREBASE_STORAGE_RULES.txt).
+    // ─────────────────────────────────────────────────────────────────────
+    match /resources/{docId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // preparer_network/{docId} — Phase 4 Service Bureau preparer roster.
+    //
+    // A Service Bureau Partner (owner_id) invites/manages sub-preparers. The
+    // owner has full read/write over their roster entries; an invited preparer
+    // who is linked (preparer_uid) can read their own entry. The owner field is
+    // immutable on update so a roster row can't be reassigned to another owner.
+    // ─────────────────────────────────────────────────────────────────────
+    match /preparer_network/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.owner_id == request.auth.uid
+            || resource.data.preparer_uid == request.auth.uid);
+      allow create: if isSignedIn()
+        && request.resource.data.owner_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.owner_id == request.auth.uid
+        && request.resource.data.owner_id == resource.data.owner_id;
+    }
+
+    // promo_codes/{docId} — discount codes. Public read so a code can be
+    // validated at checkout; a signed-in user may redeem (update usage).
+    // Creating / deleting codes is admin-only.
+    match /promo_codes/{docId} {
+      allow read: if true;
+      allow update: if isSignedIn();
+      allow create, delete: if isAdmin();
+    }
+
+    // landing_analytics/{docId} — anonymous funnel events from public marketing
+    // pages. Append-only from anyone; reads limited to signed-in users (admin).
+    match /landing_analytics/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    // crm_sync_log/{docId} — best-effort log of Famous CRM syncs. Write-mostly.
+    match /crm_sync_log/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    // user_credits/{uid} — referral credit balance keyed by the user's uid.
+    match /user_credits/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow create, update: if isSignedIn();
+    }
+
+    // email_verification_tokens/{docId} — backup verification records, written
+    // at registration by the signed-in user for their own account.
+    match /email_verification_tokens/{docId} {
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid;
+      allow read: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+    }
+
+    // user_account_status/{uid} — soft account state keyed by uid.
+    match /user_account_status/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // stripe_webhook_events/{eventId} — Stripe webhook idempotency/audit ledger.
+    // Written ONLY by Cloud Functions (admin SDK bypasses rules); never exposed
+    // to clients.
+    match /stripe_webhook_events/{eventId} {
+      allow read, write: if false;
     }
   }
 }

@@ -33,23 +33,24 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
-import { supabase } from '@/lib/supabase';
 import { redeemPromoCode } from '@/services/promoCodeService';
 import { syncContactToCrm } from '@/services/crmSyncService';
 import { sendPostPurchaseEmails } from '@/services/postPurchaseEmailService';
 
-export type MembershipTier = 'associate' | 'professional' | 'premier';
+export type MembershipTier = 'associate' | 'professional' | 'premier' | 'service_bureau';
 
 export const TIER_LEVEL: Record<MembershipTier, string> = {
   associate: 'Associate (Entry Level)',
   professional: 'Professional',
   premier: 'Premier Partner',
+  service_bureau: 'Service Bureau Partner',
 };
 
 export const TIER_PRICE: Record<MembershipTier, number> = {
   associate: 99.95,
   professional: 299.95,
   premier: 499.95,
+  service_bureau: 1499.95,
 };
 
 const FIREBASE_PROJECT_ID =
@@ -198,63 +199,13 @@ export async function createMembershipPaymentIntent(
   const readIntentId = (d: IntentData | null | undefined): string | undefined =>
     d?.paymentIntentId || d?.id;
 
-  // ── Supabase fallback ──────────────────────────────────────────────────────
-  // If the primary Firebase Cloud Function is unreachable OR returns an error
-  // (e.g. its FamousPay/Stripe secret config key isn't set, which makes it
-  // throw HTTP 500), we transparently fall back to the ALREADY-DEPLOYED
-  // Supabase edge function `create-payment-intent`. That function creates the
-  // SAME PaymentIntent on the SAME platform Stripe account using
-  // STRIPE_SECRET_KEY, so memberships keep selling even while the Firebase
-  // function is misconfigured / being redeployed.
-  //
-  // IMPORTANT: this previously pointed at `create-tax-pro-payment`, which was
-  // never deployed — so when the Firebase function 500'd, BOTH paths failed and
-  // the user saw "Could not reach the secure payment server" with no way to
-  // pay. Pointing it at the live `create-payment-intent` function fixes that.
-  // Returns null if the fallback also fails / isn't available.
-  async function trySupabaseFallback(): Promise<IntentData | null> {
-    try {
-      const { data: fbData, error: fbError } = await supabase.functions.invoke(
-        'create-payment-intent',
-        {
-          body: {
-            amount: amountCents,
-            currency: 'usd',
-            email: params.userEmail,
-            name: params.userName,
-            membershipTier: params.tier,
-            professionalId: params.userId,
-            metadata: {
-              attempt_doc_id: attemptDocId,
-              tier: params.tier,
-              tier_name: TIER_LEVEL[params.tier],
-              user_id: params.userId || '',
-              user_email: params.userEmail,
-              user_name: params.userName || '',
-              user_phone: params.userPhone || '',
-              promo_code: params.promoCode || '',
-              promo_amount: params.promoAmount ? String(params.promoAmount) : '',
-              promo_doc_id: params.promoDocId || '',
-              source: 'pricing-page-inline-checkout-supabase-fallback',
-            },
-          },
-        },
-      );
-      const secret = readClientSecret(fbData as IntentData);
-      if (fbError || !secret) {
-        console.warn('[membershipCheckout] Supabase fallback unavailable:', fbError || fbData);
-        return null;
-      }
-      console.info('[membershipCheckout] Used Supabase fallback for PaymentIntent.');
-      return fbData as IntentData;
-    } catch (e) {
-      console.warn('[membershipCheckout] Supabase fallback threw:', e);
-      return null;
-    }
-  }
-
-
-  // ── Primary: Firebase Cloud Function (timeout + one retry) ──────────────────
+  // ── Primary (and only) backend: Firebase Cloud Function ─────────────────────
+  // Supabase has been fully removed from this project, so there is no edge-
+  // function fallback anymore — `createTaxProPayment` is the single source of
+  // truth for membership PaymentIntents. When it errors we surface its EXACT
+  // server message (e.g. "Stripe is not configured on the server. Set it with:
+  // firebase functions:config:set stripe.secret=…") so the operator knows what
+  // to fix, instead of masking it behind a dead fallback path.
   let data: IntentData | null = null;
   let firebaseHttpError: string | null = null;
   let firebaseUnreachable = false;
@@ -285,22 +236,14 @@ export async function createMembershipPaymentIntent(
     if (response.ok && primarySecret) {
       data = parsed;
     } else {
-      // Capture the EXACT server error (e.g. "Stripe is not configured on the
-      // server. Set it with: firebase functions:config:set stripe.secret=…")
-      // so we can surface something actionable instead of a vague network
-      // message. This is the root cause of the onboarding "could not reach
-      // the secure payment server" report.
       firebaseHttpError =
         parsed?.error ||
         `Payment server returned HTTP ${response.status}.`;
-      // Firebase responded but couldn't create the intent — try the fallback.
-      data = await trySupabaseFallback();
     }
   } catch (networkErr) {
-    // Total network failure reaching Firebase ("Failed to fetch"). Try fallback.
-    console.warn('[membershipCheckout] Firebase unreachable, trying fallback…', networkErr);
+    // Total network failure reaching the Cloud Function ("Failed to fetch").
+    console.warn('[membershipCheckout] Firebase Cloud Function unreachable:', networkErr);
     firebaseUnreachable = true;
-    data = await trySupabaseFallback();
   }
 
   const resolvedSecret = readClientSecret(data);

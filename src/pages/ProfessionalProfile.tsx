@@ -15,11 +15,19 @@ import ProfessionalServicesDisplay from '@/components/ProfessionalServicesDispla
 import PackageComparisonDisplay from '@/components/PackageComparisonDisplay';
 import { ReviewDisplay } from '@/components/ReviewDisplay';
 import { ReviewSubmissionForm } from '@/components/ReviewSubmissionForm';
-import { getProfessionalById, sampleProfessionals } from '@/services/professionalsService';
+import ShareableProfileLink from '@/components/ShareableProfileLink';
+import {
+  getProfessionalById,
+  getProfessionalBySlug,
+  sampleProfessionals,
+  type Professional,
+} from '@/services/professionalsService';
 
 
 const ProfessionalProfile: React.FC = () => {
-  const { id } = useParams();
+  // This page serves BOTH /preparer/:slug (preferred, human-readable) and the
+  // legacy /professional/:id alias. Whichever param is present drives the load.
+  const { id, slug } = useParams();
   const navigate = useNavigate();
   const [selectedDate, setSelectedDate] = useState<Date>();
   const [selectedTime, setSelectedTime] = useState<string>();
@@ -29,76 +37,95 @@ const ProfessionalProfile: React.FC = () => {
   const [loading, setLoading] = useState(true);
 
 
+  const mapProfessional = (data: Professional | any) => ({
+    id: data.id,
+    slug: data.slug || '',
+    name: data.full_name,
+    title: data.specializations?.[0] || data.business_name || 'Tax Professional',
+    category: 'cpa',
+    image: data.profile_image_url || 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=400&h=400&fit=crop',
+    rating: data.rating || 4.5,
+    reviewCount: data.review_count || 0,
+    location: data.location || 'United States',
+    phone: data.phone || '(555) 000-0000',
+    email: data.email,
+    specialties: data.specializations || data.services || [],
+    experience: data.years_experience || 5,
+    description: data.bio || 'Experienced tax professional ready to help with your tax needs.',
+    certifications: data.credentials?.certifications || [],
+    hourlyRate: data.pricing?.hourlyRate ? `$${data.pricing.hourlyRate}` : '$150',
+    bio: data.bio || 'Experienced tax professional dedicated to helping clients with their tax needs.',
+    services: data.services || [],
+    serviceCategories: data.service_categories || [],
+    serviceModality: data.service_modality || 'both',
+    packages: data.packages || [],
+    membershipLevel: data.membership_level,
+    education: [],
+    testimonials: [],
+  });
+
   useEffect(() => {
     const fetchProfessional = async () => {
-      if (!id) return;
+      if (!id && !slug) return;
       setLoading(true);
-      
+
       try {
-        // First try to get from database
-        const data = await getProfessionalById(id);
-        
+        // Prefer slug lookup (/preparer/:slug); fall back to uid (/professional/:id).
+        const data = slug
+          ? await getProfessionalBySlug(slug)
+          : await getProfessionalById(id as string);
+
         if (data) {
-          setProfessional({
-            id: data.id,
-            name: data.full_name,
-            title: data.specializations?.[0] || data.business_name || 'Tax Professional',
-            category: 'cpa',
-            image: data.profile_image_url || 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=400&h=400&fit=crop',
-            rating: data.rating || 4.5,
-            reviewCount: data.review_count || 0,
-            location: data.location || 'United States',
-            phone: data.phone || '(555) 000-0000',
-            email: data.email,
-            specialties: data.specializations || data.services || [],
-            experience: data.years_experience || 5,
-            description: data.bio || 'Experienced tax professional ready to help with your tax needs.',
-            certifications: data.credentials?.certifications || [],
-            hourlyRate: data.pricing?.hourlyRate ? `$${data.pricing.hourlyRate}` : '$150',
-            bio: data.bio || 'Experienced tax professional dedicated to helping clients with their tax needs.',
-            services: data.services || [],
-            packages: data.packages || [],
-            membershipLevel: data.membership_level,
-            education: [],
-            testimonials: []
-          });
+          setProfessional(mapProfessional(data));
         } else {
-          // Check sample data as fallback
-          const samplePro = sampleProfessionals.find(p => p.id === id);
+          // Check sample data as fallback (match by uid or derived slug).
+          const samplePro = sampleProfessionals.find(
+            (p) => p.id === id || (slug && p.full_name && p.id === slug)
+          );
           if (samplePro) {
-            setProfessional({
-              id: samplePro.id,
-              name: samplePro.full_name,
-              title: samplePro.specializations?.[0] || samplePro.business_name || 'Tax Professional',
-              category: 'cpa',
-              image: samplePro.profile_image_url || 'https://images.unsplash.com/photo-1560250097-0b93528c311a?w=400&h=400&fit=crop',
-              rating: samplePro.rating || 4.5,
-              reviewCount: samplePro.review_count || 0,
-              location: samplePro.location || 'United States',
-              phone: samplePro.phone || '(555) 000-0000',
-              email: samplePro.email,
-              specialties: samplePro.specializations || samplePro.services || [],
-              experience: samplePro.years_experience || 5,
-              description: samplePro.bio || 'Experienced tax professional ready to help with your tax needs.',
-              certifications: samplePro.credentials?.certifications || [],
-              hourlyRate: samplePro.pricing?.hourlyRate ? `$${samplePro.pricing.hourlyRate}` : '$150',
-              bio: samplePro.bio || 'Experienced tax professional dedicated to helping clients with their tax needs.',
-              services: samplePro.services || [],
-              packages: [],
-              membershipLevel: samplePro.membership_level,
-              education: [],
-              testimonials: []
-            });
+            setProfessional(mapProfessional(samplePro));
           }
         }
       } catch (error) {
         console.error('Error fetching professional:', error);
       }
-      
+
       setLoading(false);
     };
     fetchProfessional();
-  }, [id]);
+  }, [id, slug]);
+
+  // ── SEO: title + meta description per profile (category-based discovery). ──
+  useEffect(() => {
+    if (!professional) return;
+    const prevTitle = document.title;
+    const cats: string[] = professional.serviceCategories?.length
+      ? professional.serviceCategories
+      : professional.specialties || [];
+    const catText = cats.length ? ` — ${cats.slice(0, 3).join(', ')}` : '';
+    document.title = `${professional.name}${catText} | Refund Connect`;
+
+    const desc =
+      `${professional.name}, ${professional.title} in ${professional.location}. ` +
+      `${professional.bio}`.slice(0, 160);
+    let meta = document.querySelector('meta[name="description"]') as HTMLMetaElement | null;
+    const created = !meta;
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'description';
+      document.head.appendChild(meta);
+    }
+    const prevDesc = meta.content;
+    meta.content = desc;
+
+    return () => {
+      document.title = prevTitle;
+      if (meta) {
+        if (created) meta.remove();
+        else meta.content = prevDesc;
+      }
+    };
+  }, [professional]);
 
 
   const handleTimeSlotSelect = (date: Date, time: string) => {
@@ -322,6 +349,14 @@ const ProfessionalProfile: React.FC = () => {
                     Call Now
                   </a>
                 </Button>
+
+                <div className="pt-2 border-t border-blue-200">
+                  <ShareableProfileLink
+                    slug={professional.slug}
+                    professionalId={professional.id}
+                    label="Share this profile"
+                  />
+                </div>
               </CardContent>
             </Card>
           </div>

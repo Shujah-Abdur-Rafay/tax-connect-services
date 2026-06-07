@@ -3,22 +3,66 @@ import {
   doc,
   getDoc,
   getDocs,
+  setDoc,
   query,
   where,
   orderBy,
+  limit as fsLimit,
   updateDoc,
   serverTimestamp,
   Timestamp,
 } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { slugify } from '@/services/gigsService';
+
+/** How a professional delivers their services. */
+export type ServiceModality = 'virtual' | 'in_person' | 'both';
+
+/**
+ * First-class service taxonomy for category filtering & SEO. Kept in one place
+ * so the directory filters, onboarding, and profile pages stay in lockstep.
+ */
+export const SERVICE_CATEGORIES: { value: string; label: string }[] = [
+  { value: 'tax-preparation', label: 'Tax Preparation' },
+  { value: 'tax-planning', label: 'Tax Planning' },
+  { value: 'bookkeeping', label: 'Bookkeeping' },
+  { value: 'accounting', label: 'Accounting' },
+  { value: 'payroll', label: 'Payroll' },
+  { value: 'tax-resolution', label: 'Tax Resolution / IRS Representation' },
+  { value: 'business-formation', label: 'Business Formation' },
+  { value: 'financial-services', label: 'Financial Services' },
+];
+
+export const SERVICE_MODALITY_OPTIONS: { value: ServiceModality; label: string }[] = [
+  { value: 'both', label: 'Virtual & In-person' },
+  { value: 'virtual', label: 'Virtual only' },
+  { value: 'in_person', label: 'In-person only' },
+];
 
 export interface Professional {
   id: string;
+  /**
+   * Human-readable, URL-safe handle used for the public landing page at
+   * `/preparer/{slug}` (e.g. "john-smith"). Unique across all professionals.
+   * Assigned automatically at registration; `/professional/{uid}` remains a
+   * working alias.
+   */
+  slug?: string;
   email: string;
   full_name: string;
   business_name?: string;
   phone?: string;
   location: string;
+  /**
+   * How the pro delivers service: remotely, on-site, or both. Powers the
+   * "virtual vs in-person" directory filter. Defaults to 'both'.
+   */
+  service_modality?: ServiceModality;
+  /**
+   * First-class service taxonomy tags (Tax Prep, Bookkeeping, Payroll, …) used
+   * for category filtering & SEO, distinct from the free-text `services` list.
+   */
+  service_categories?: string[];
   /** City portion of the address (e.g. "Dearborn") */
   city?: string;
   /** State abbreviation (e.g. "MI") */
@@ -469,6 +513,7 @@ function normalizeProfessional(id: string, raw: any): Professional {
 
   return {
     id,
+    slug: raw.slug || '',
     email: raw.email || '',
     full_name:
       raw.full_name ||
@@ -477,6 +522,10 @@ function normalizeProfessional(id: string, raw: any): Professional {
     business_name: raw.business_name || '',
     phone: raw.phone || '',
     location,
+    service_modality: (raw.service_modality as ServiceModality) || 'both',
+    service_categories: Array.isArray(raw.service_categories)
+      ? raw.service_categories
+      : [],
     city,
     state,
     zip_code: raw.zip_code || raw.zipCode || '',
@@ -642,6 +691,153 @@ export const getProfessionalByEmail = async (
     return samplePro || null;
   }
 };
+
+// ────────────────────────────────────────────────────────────────────────────
+// Slug-based landing pages (`/preparer/{slug}`)
+// ────────────────────────────────────────────────────────────────────────────
+
+/** Look up a professional by their human-readable slug. */
+export const getProfessionalBySlug = async (
+  slug: string
+): Promise<Professional | null> => {
+  const clean = (slug || '').trim().toLowerCase();
+  if (!clean) return null;
+  try {
+    const snap = await getDocs(
+      query(collection(db, COLLECTION), where('slug', '==', clean), fsLimit(1))
+    );
+    if (!snap.empty) {
+      const d = snap.docs[0];
+      return normalizeProfessional(d.id, d.data());
+    }
+  } catch (error) {
+    console.warn('[professionalsService] getProfessionalBySlug failed:', error);
+  }
+  // Fall back to sample data (lets demo profiles resolve by slug too).
+  const sample = sampleProfessionals.find((p) => slugify(p.full_name) === clean);
+  return sample || null;
+};
+
+/**
+ * True when `slug` is already taken by a DIFFERENT professional. Used to
+ * guarantee uniqueness before assigning a slug.
+ */
+async function slugTaken(slug: string, excludeUid?: string): Promise<boolean> {
+  try {
+    const snap = await getDocs(
+      query(collection(db, COLLECTION), where('slug', '==', slug), fsLimit(2))
+    );
+    return snap.docs.some((d) => d.id !== excludeUid);
+  } catch (error) {
+    console.warn('[professionalsService] slugTaken check failed:', error);
+    // On a read failure, assume not taken so registration isn't blocked; a
+    // collision is extremely unlikely and the directory still works by uid.
+    return false;
+  }
+}
+
+/**
+ * Generate a unique slug from a display name. Tries the bare slug first
+ * ("john-smith"), then numeric suffixes ("john-smith-2", "-3", …). Falls back
+ * to appending a short uid fragment if every candidate is somehow taken.
+ */
+export async function generateUniqueSlug(
+  name: string,
+  uid?: string
+): Promise<string> {
+  const base = slugify(name || '') || 'preparer';
+  if (!(await slugTaken(base, uid))) return base;
+  for (let i = 2; i <= 9; i += 1) {
+    const candidate = `${base}-${i}`;
+    if (!(await slugTaken(candidate, uid))) return candidate;
+  }
+  const suffix = (uid || Math.random().toString(36).slice(2)).slice(0, 6).toLowerCase();
+  return `${base}-${suffix}`;
+}
+
+/**
+ * Backfill a slug onto an existing professional doc that predates the slug
+ * feature. Safe to call repeatedly — only writes when the slug is missing.
+ * Returns the resolved slug (existing or newly generated).
+ */
+export async function ensureProfessionalSlug(
+  uid: string,
+  name?: string
+): Promise<string | null> {
+  if (!db || !uid) return null;
+  try {
+    const ref = doc(db, COLLECTION, uid);
+    const snap = await getDoc(ref);
+    if (!snap.exists()) return null;
+    const data = snap.data() as any;
+    if (data.slug) return data.slug;
+    const slug = await generateUniqueSlug(name || data.full_name || data.email || 'preparer', uid);
+    await updateDoc(ref, { slug, updated_at: serverTimestamp() });
+    return slug;
+  } catch (error) {
+    console.warn('[professionalsService] ensureProfessionalSlug failed:', error);
+    return null;
+  }
+}
+
+/**
+ * LAUNCH-CRITICAL: create a free **Directory Listing** profile the moment a
+ * professional registers, so they instantly have a shareable landing page.
+ * Onboarding later enriches this same doc. Idempotent — if a doc already
+ * exists for the uid it is left intact (only a missing slug is backfilled).
+ *
+ * Returns the resolved slug so the caller can show the shareable URL.
+ */
+export async function createProfessionalListing(input: {
+  uid: string;
+  name: string;
+  email: string;
+}): Promise<{ slug: string } | null> {
+  if (!db) return null;
+  if (!input.uid) throw new Error('createProfessionalListing requires a uid.');
+
+  const ref = doc(db, COLLECTION, input.uid);
+  try {
+    const existing = await getDoc(ref);
+    if (existing.exists()) {
+      // Already onboarding/registered — just make sure it has a slug.
+      const slug = await ensureProfessionalSlug(input.uid, input.name);
+      return { slug: slug || '' };
+    }
+
+    const slug = await generateUniqueSlug(input.name || input.email, input.uid);
+
+    await setDoc(
+      ref,
+      {
+        slug,
+        email: input.email || '',
+        full_name: input.name || '',
+        bio: '',
+        services: [],
+        specializations: [],
+        service_categories: [],
+        service_modality: 'both' as ServiceModality,
+        years_experience: 0,
+        rating: 0,
+        review_count: 0,
+        // Free directory listing is live + searchable immediately (locked
+        // roadmap decision). Onboarding enriches it; admin can still moderate.
+        is_published: true,
+        approval_status: 'approved',
+        membership_level: 'Directory Listing',
+        onboarding_completed: false,
+        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
+      },
+      { merge: true }
+    );
+    return { slug };
+  } catch (error) {
+    console.warn('[professionalsService] createProfessionalListing failed:', error);
+    return null;
+  }
+}
 
 export const searchProfessionals = async (
   searchTerm: string

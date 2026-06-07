@@ -8,6 +8,26 @@ This document maps the client's requirements against the **current codebase** so
 
 ---
 
+## ✅ Implementation status (updated 2026-06-07)
+
+**Phase 0 (Foundation fixes) and Phase 1 (Auto-profile + slug + directory) — the "minimum viable launch" — are now implemented and build clean** (`vite build` + functions `tsc` both pass).
+
+- **Phase 0 — done in code:** `refundGigOrder` Cloud Function implemented (+ `onReviewWrite` / `onReviewVoteWrite` rating/vote triggers); reviews migrated off the Supabase stub to a Firestore `reviews` / `review_votes` model via new `src/services/reviewsService.ts`; launch-critical Supabase live calls removed (`membershipCheckoutService` dead fallback, `ProfessionalContactForm` inquiry path); `firestore.rules` reconciled with every collection actually used (added `gigs`, `gig_orders`, `reviews`, `review_votes`, `platform_settings`, `promo_codes`, `crm_sync_log`, `landing_analytics`, `user_credits`, `email_verification_tokens`, `user_account_status`, `stripe_webhook_events`, plus an `isAdmin()` helper).
+- **Phase 1 — done in code:** `slug` + `service_modality` + `service_categories` added to the `Professional` model with `generateUniqueSlug` / `getProfessionalBySlug` / `createProfessionalListing` / `ensureProfessionalSlug`; a free **Directory Listing** profile + slug is auto-created at registration (`AuthContext.register`); new `/preparer/:slug` route renders `ProfessionalProfile` (with `/professional/:id` kept as an alias); a `ShareableProfileLink` component surfaces the copy-link action on the profile page **and** the onboarding completion screen; the directory (`FindProfessionals`) gained virtual/in-person + service-category filters and now links to `/preparer/:slug`; profile pages set SEO `<title>` + meta description.
+- **Still requires the operator (not code):** deploy the new functions (`firebase deploy --only functions`) and rules (`firebase deploy --only firestore:rules`) to project `refund-connect-1m30`, and add a `slug` Firestore index if the directory grows large. The remaining ~19 secondary Supabase call-sites (billing, subscriptions, documents, collaborative editor, tax-assistant chat) still no-op against the stub and are migrated within their owning phases (2–4) below.
+
+**Phases 2, 3, 4, and 5 are also implemented in code** (frontend `vite build` + functions `tsc` both pass):
+- Phase 2 — unified client home at `/client/dashboard`, review-on-completion prompts in `/my-orders`, and an `appointmentReminderCron`.
+- Phase 3 — consolidated `/pro/dashboard`, leads/earnings views, and a tier-gated Resource Center with an admin upload tool at `/admin/resources`.
+- Phase 4 — Service Bureau Partner tier (4th plan), recurring Stripe subscription Cloud Functions (`createSubscriptionCheckout` + `createBillingPortalSession`) with a subscribe/manage-billing UI, a PTIN verification gate, and Service Bureau preparer-network management + reporting.
+- Phase 5 — completed admin dashboard: subscription monitor, payout/commission monitor, review moderation, and an admin-tools hub (+ approval queue, user/membership management, announcements, support inbox that already existed).
+
+See the per-phase sections below for specifics. **Operator steps remain:** create a recurring Stripe Product/Price per tier and set the `stripe.price_*` function config, then `firebase deploy --only functions,firestore:rules` (+ Storage rules).
+
+**Everything through Phase 5 is now implemented in code.** Only **Phase 6 (post-launch wishlist)** remains as forward plan.
+
+---
+
 ## How to read this
 
 | Tag | Meaning |
@@ -84,33 +104,39 @@ Each client requirement, its status today, the existing code to reuse, and the g
 ### Phase 0 — Foundation fixes *(unblock launch — ~1 week)*
 The platform has a few latent breakages that will bite during launch. Fix these first.
 
-- [ ] **Implement & deploy the missing `refundGigOrder` Cloud Function** that `gigOrdersService.refundGigOrder` already calls (Stripe refund on the stored PaymentIntent → write `refunded` state back to the order).
-- [ ] **Fix reviews:** migrate `ReviewSubmissionForm`, `ReviewDisplay`, and `ReviewResponseForm` off the Supabase stub to a Firestore `reviews` collection; recompute `professionals.rating` / `review_count` on write.
-- [ ] **Finish removing Supabase:** sweep the ~29 files still importing `@/lib/supabase`; migrate any live calls — notably `membershipCheckoutService.trySupabaseFallback` (its fallback can never succeed against the stub).
-- [ ] **Reconcile Firestore rules:** ensure `firestore.rules` covers every collection actually used (`gigs`, `gig_orders`, `platform_settings`, `reviews`, `crm_sync_log`, `stripe_webhook_events`, …); verify the **deployed** ruleset matches the file; add Storage rules for new paths.
+- [x] **Implemented the missing `refundGigOrder` Cloud Function** that `gigOrdersService.refundGigOrder` already calls — creates a Stripe refund on the stored PaymentIntent (reversing the Connect transfer + application fee on destination charges) and writes `refunded`/`cancelled` state back to the order. *(Deploy is an operator step.)*
+- [x] **Fixed reviews:** `ReviewSubmissionForm`, `ReviewDisplay`, and `ReviewResponseForm` now use the new `reviewsService.ts` (Firestore `reviews` + `review_votes`); `professionals.rating` / `review_count` and per-review vote tallies are recomputed by the `onReviewWrite` / `onReviewVoteWrite` Cloud Function triggers.
+- [x] **Removed launch-critical Supabase calls:** deleted `membershipCheckoutService.trySupabaseFallback` (dead) and the `ProfessionalContactForm` Supabase inquiry path (the Firebase `mail` queue already covers it). *(~19 secondary call-sites still no-op against the stub; migrated within phases 2–4.)*
+- [x] **Reconciled Firestore rules:** `firestore.rules` now covers every collection actually used (`gigs`, `gig_orders`, `platform_settings`, `reviews`, `review_votes`, `promo_codes`, `crm_sync_log`, `landing_analytics`, `user_credits`, `email_verification_tokens`, `user_account_status`, `stripe_webhook_events`) plus an `isAdmin()` helper. *(Redeploy the ruleset; Storage rules for new paths come with the Phase 3 Resource Center.)*
 
 ### Phase 1 — LAUNCH CRITICAL: Auto profile + slug landing page + directory *(~1.5–2 weeks)*
-- [ ] Add a `slug` field to the `Professional` model; generate it from the name (reuse `slugify`) with a numeric suffix on collision; store + index it.
-- [ ] On `AuthContext.register` for `role=professional`, immediately create a free **Directory Listing** `professionals/{uid}` doc — published & searchable — and assign the slug.
-- [ ] Add a `/preparer/:slug` route that looks up by slug and reuses `ProfessionalProfile.tsx`; keep `/professional/:id` as a redirect/alias.
-- [ ] Surface a **"copy your shareable link"** action on the profile page and at onboarding completion.
-- [ ] Extend the directory: add `serviceModality` (virtual / in-person / both) + the service-type taxonomy to the data model, expose them as filters in `AdvancedFilters` / `FindProfessionals`, add sorting + SEO meta tags on profile pages.
+- [x] Added a `slug` field to the `Professional` model; generated from the name via `slugify` with a numeric suffix on collision (`generateUniqueSlug`). *(Add a Firestore single-field index on `slug` once the directory grows.)*
+- [x] On `AuthContext.register` for `role=professional`, `createProfessionalListing` immediately creates a free **Directory Listing** `professionals/{uid}` doc — published & searchable — and assigns the slug.
+- [x] Added a `/preparer/:slug` route that looks up by slug and reuses `ProfessionalProfile.tsx`; `/professional/:id` kept as a working alias.
+- [x] Surfaced a **"copy your shareable link"** action (`ShareableProfileLink`) on the profile page and at onboarding completion.
+- [x] Extended the directory: added `service_modality` (virtual / in-person / both) + a `service_categories` taxonomy to the data model, exposed as a modality dropdown + category chips in `FindProfessionals` (with active-filter badges), and added SEO `<title>` + meta description on profile pages. Cards/map now link to `/preparer/:slug`.
 
-### Phase 2 — Client portal completion *(~1.5 weeks)*
-- [ ] Unified client home (appointments, orders, documents, messages, reviews in one place).
-- [ ] Reviews end-to-end (depends on Phase 0) — prompt for a rating/review on booking completion and gig delivery.
-- [ ] Booking polish: availability calendar, appointment reminders, smoother secure document sharing.
+### Phase 2 — Client portal completion *(~1.5 weeks)* — ✅ done in code
+- [x] **Unified client home** at `/client/dashboard` (alias `/dashboard`) — `ClientDashboard.tsx`: tabbed hub (Overview with live order/review counts, Orders summary + deep-link to the full `/my-orders` workspace, Appointments, Messages, Documents, Reviews-you've-written). New `client/ClientAppointmentsList.tsx` queries `appointments` by `client_id`; Header gained a **My Dashboard** link for client accounts.
+- [x] **Reviews end-to-end** — `MyOrders` now shows a "Leave a review" prompt on delivered/completed orders (opens `ReviewSubmissionForm` in a dialog, prefilled with the order's pro), and marks pros you've already reviewed (`reviewsService.getReviewsByClient`). This closes the loop opened by the Phase 0 reviews migration.
+- [x] **Booking polish** — added the `appointmentReminderCron` Cloud Function (emails clients a reminder for appointments in the next ~36h, dedup-stamped via `reminder_sent_at`, delivered through Gmail + the `mail` Trigger-Email queue). Availability calendar (`AvailabilityCalendar`) and secure document sharing already existed and are surfaced through the dashboard. *(Operator: deploy functions so the cron schedules.)*
 
-### Phase 3 — Professional dashboard + resource center *(~2 weeks)*
-- [ ] Consolidated pro dashboard: profile/services/pricing, leads & inquiries, appointments, messages, documents, earnings + commissions, reviews.
-- [ ] New **Resource Center**: `resources` Firestore collection + Storage prefix, admin upload UI, tier-gated pro library (training, guides, compliance, marketing, video, forms/checklists, manuals).
+### Phase 3 — Professional dashboard + resource center *(~2 weeks)* — ✅ done in code
+- [x] **Consolidated pro dashboard** at `/pro/dashboard` (`ProDashboard.tsx`): one tabbed hub for Profile & Services, Leads & Inquiries, Appointments, Messages, Documents, Earnings + Commissions, Reviews, and the Resource Center, with an Overview that links out to the standalone Gigs / Orders / Payouts tools (consolidates rather than duplicates). New pieces: `pro/ProLeadsInbox.tsx` (queries `contact_submissions` by `professional_id` via `getLeadsForProfessional`, with a new→in-progress→resolved pipeline) and `pro/ProEarningsSummary.tsx` (gross / platform-commission / net split computed from gig orders at the live `platform_settings/fees` percent). `ServiceManagementDashboard` migrated off the Supabase stub to Firestore (`professionals/{uid}.services`). Header gained a **Pro Dashboard** link.
+- [x] **Resource Center**: `resources` Firestore collection + `resources/{id}/` Storage prefix via new `resourcesService.ts` (file upload / external link / video URL, 7 categories, tier-gated by `min_tier`); admin upload UI at `/admin/resources` (`AdminResources.tsx`, admin-gated); tier-gated pro library component `ResourceCenter.tsx` (locked cards show an upgrade CTA). Tier ranking helpers (`getTierRank` / `meetsTier` / `RESOURCE_TIER_OPTIONS`) added to `membershipLevels.ts`. `firestore.rules` adds a `resources` block (signed-in read, admin write); `FIREBASE_STORAGE_RULES.txt` adds a `resources/{id}/` block (signed-in read, admin write ≤ 50 MB). *(Operator: redeploy rules + Storage rules; consider a `created_at` index on `resources` as it grows.)*
 
-### Phase 4 — Membership + subscriptions + Service Bureau tier *(~2 weeks)*
-- [ ] Add the **Service Bureau Partner** tier to `membershipLevels`, checkout, and the plans UI; build preparer-network management (sub-accounts), advanced reporting, and admin tools.
-- [ ] Convert tiers to recurring **Stripe subscriptions** (Stripe Products/Prices, subscription checkout, customer portal); rename tiers to "*Partner"; enforce **PTIN verification** for the Professional Partner tier.
+### Phase 4 — Membership + subscriptions + Service Bureau tier *(~2 weeks)* — ✅ done in code
+- [x] **Service Bureau Partner tier** added to `membershipLevels` (`MembershipLevel.SERVICE_BUREAU`, rank 4, `isServiceBureau()` helper) and the checkout maps (`membershipCheckoutService` `TIER_LEVEL`/`TIER_PRICE` → `service_bureau` @ $1,499.95). Surfaced as a 4th plan card + comparison column on the `/pricing` page (4-up grid, "Enterprise" badge). Preparer-network management (sub-accounts) + advanced cross-network reporting via new `preparerNetworkService.ts` + `pro/ServiceBureauPanel.tsx`, shown as a **Service Bureau** tab in `/pro/dashboard` (gated to the tier). `preparer_network` Firestore rules added (owner-scoped read/write, owner immutable).
+- [x] **Recurring Stripe subscriptions**: new Cloud Functions `createSubscriptionCheckout` (Checkout in `subscription` mode, stamps `subscription_data.metadata.{professional_id, membership_tier}` so the existing `customer.subscription.*` webhook handlers flip the doc on renewal/cancel) + `createBillingPortalSession` (Stripe Customer Portal). Frontend `subscriptionService.ts` + `pro/SubscriptionBilling.tsx` (subscribe per tier / manage billing / shows live subscription status), surfaced on `/pricing` ("Prefer automatic renewal?") and the dashboard **Billing** tab. *(Operator: create one recurring Product/Price per tier and set `firebase functions:config:set stripe.price_associate=… price_professional=… price_premier=… price_service_bureau=…`, then deploy functions.)*
+- [x] **PTIN verification gate**: `ptinService.ts` (format-validates `P########`, stores `ptin`/`ptin_verified` on the pro's own `professionals/{uid}` doc) + `pro/PtinVerificationDialog.tsx`; the subscription flow blocks subscribing to a paid tier until a valid PTIN is on file. *(Tier names already read "Premier Partner" / "Service Bureau Partner"; true IRS directory verification is a future server-side flip of `ptin_verified`.)*
 
-### Phase 5 — Admin dashboard completion *(~1.5 weeks)*
-- [ ] User & professional management, profile-approval queue (reuse `ApprovalWorkflow`), payout/commission monitoring (Connect), subscription management, review moderation, announcements (reuse broadcast), and a support-ticket inbox.
+### Phase 5 — Admin dashboard completion *(~1.5 weeks)* — ✅ done in code
+- [x] The `/admin` dashboard (`AdminDashboard.tsx`) now has tabs for **Applications**, **Professionals** (approval queue via `ProfessionalListingManager` — approve/reject/publish), **Memberships** (user management via `UserMembershipManager`), plus new Phase-5 tabs:
+  - **Subscriptions** — `admin/AdminSubscriptionsManager.tsx` lists every member's Stripe subscription status/tier/renewal (synced by the `customer.subscription.*` webhook), with a deep-link to the Stripe customer.
+  - **Payouts** — `admin/AdminPayoutsMonitor.tsx` aggregates platform commission / pro-net / refunds across all gig orders at the live fee, with a per-pro breakdown (`adminReportingService.ts`).
+  - **Reviews** — `admin/AdminReviewModeration.tsx` lists all reviews with hide/unhide + delete (`reviewsService` gained `getAllReviews` / `adminSetReviewHidden` / `adminDeleteReview` + an `is_hidden` flag filtered from public display).
+  - **Tools** — `admin/AdminToolsGrid.tsx` links the standalone admin pages: support-ticket inbox (`/admin/contact-submissions`), announcements/broadcast (`/admin/crm-broadcast`), CRM contacts, Resource Center upload (`/admin/resources`), platform fees, enrollments, signed agreements, landing analytics, notifications, and Stripe/Firestore health.
+- Rules: `gig_orders` read now also allows `isAdmin()` (commission monitor); `reviews` update/delete now also allow `isAdmin()` (moderation).
 
 ### Phase 6 — Phase-2 wishlist *(post-launch, scoped later)*
 - [ ] Deeper CRM integration (extend the Famous CRM sync), marketing automation, SMS (e.g. Twilio), video training portal, certification programs, tax-software integrations, full Service Bureau / franchise reporting, expanded referral tracking (extend `referralService`).

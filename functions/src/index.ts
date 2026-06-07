@@ -1966,3 +1966,675 @@ export const onboardingReminderCron = functions.pubsub
 
     return null;
   });
+
+
+/**
+ * refundGigOrder
+ *
+ * HTTPS endpoint that issues a Stripe refund for a paid gig order and writes
+ * the refunded state back to `gig_orders/{orderId}`. This is the server half of
+ * gigOrdersService.refundGigOrder on the client (which previously 404'd because
+ * this function did not exist).
+ *
+ * Gig payments are Connect *destination charges* (the pro is paid via
+ * transfer_data.destination and the platform keeps an application fee), so a
+ * full refund must also:
+ *   • reverse the transfer to the pro (`reverse_transfer: true`), and
+ *   • return the platform's application fee (`refund_application_fee: true`),
+ * so the client is made whole and the money is pulled back proportionally from
+ * both the pro and the platform. Those flags are only valid when the charge
+ * actually has a transfer / application fee, so we inspect the PaymentIntent
+ * first and only set them when present (a plain membership charge has neither).
+ *
+ * Request (POST JSON):
+ *   {
+ *     paymentIntentId: string,   // required — the PI to refund
+ *     orderId?: string,          // gig_orders/{orderId} to mark refunded
+ *     amount?: number,           // optional partial-refund amount IN CENTS; omit for full
+ *     reason?: string,           // Stripe enum: requested_by_customer|duplicate|fraudulent
+ *     initiatedBy?: 'client'|'pro',
+ *     note?: string              // free-text note stored on the order
+ *   }
+ *
+ * Response (200 JSON):
+ *   { ok: true, refundId, status, amount (dollars), amountCents, currency,
+ *     reversedTransfer, refundedApplicationFee }
+ */
+export const refundGigOrder = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      if (req.method !== 'POST') {
+        res.status(405).json({ ok: false, error: 'Method not allowed. Use POST.' });
+        return;
+      }
+
+      const cfg = functions.config() as Record<string, any>;
+      const [cfgNamespace, cfgField] = STRIPE_SECRET_CONFIG_KEY.split('.');
+      const stripeSecret =
+        cfg?.[cfgNamespace]?.[cfgField] || process.env.STRIPE_SECRET_KEY;
+      if (!stripeSecret) {
+        console.error(
+          `[refundGigOrder] Stripe secret key is not configured (expected "${STRIPE_SECRET_CONFIG_KEY}").`
+        );
+        res.status(500).json({
+          ok: false,
+          configKey: STRIPE_SECRET_CONFIG_KEY,
+          error:
+            'Stripe is not configured on the server. Set it with: ' +
+            `firebase functions:config:set ${STRIPE_SECRET_CONFIG_KEY}="sk_live_..."`,
+        });
+        return;
+      }
+
+      const stripe = new Stripe(stripeSecret, {
+        apiVersion: '2023-10-16',
+        typescript: true,
+      });
+
+      const {
+        paymentIntentId,
+        orderId,
+        amount,
+        reason,
+        initiatedBy,
+        note,
+      } = (req.body || {}) as {
+        paymentIntentId?: string;
+        orderId?: string;
+        amount?: number;
+        reason?: string;
+        initiatedBy?: 'client' | 'pro';
+        note?: string;
+      };
+
+      if (!paymentIntentId || typeof paymentIntentId !== 'string') {
+        res.status(400).json({ ok: false, error: 'paymentIntentId is required.' });
+        return;
+      }
+
+      // Inspect the PaymentIntent + its latest charge to (a) confirm it is
+      // refundable, (b) guard against a double refund, and (c) decide whether
+      // to reverse the Connect transfer / refund the application fee.
+      const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
+        expand: ['latest_charge'],
+      });
+
+      if (pi.status !== 'succeeded') {
+        res.status(400).json({
+          ok: false,
+          error: `PaymentIntent is not in a refundable state (status="${pi.status}").`,
+        });
+        return;
+      }
+
+      const charge =
+        typeof pi.latest_charge === 'object' && pi.latest_charge
+          ? (pi.latest_charge as Stripe.Charge)
+          : null;
+
+      if (charge?.refunded) {
+        res
+          .status(400)
+          .json({ ok: false, error: 'This payment has already been fully refunded.' });
+        return;
+      }
+
+      const hasTransfer = !!(charge && (charge as any).transfer);
+      const hasAppFee = !!(charge && (charge as any).application_fee);
+
+      const cleanNote = note ? String(note).slice(0, 480) : '';
+      const refundParams: Stripe.RefundCreateParams = {
+        payment_intent: paymentIntentId,
+        metadata: {
+          ...(orderId ? { orderId } : {}),
+          ...(initiatedBy ? { initiatedBy } : {}),
+          ...(cleanNote ? { note: cleanNote } : {}),
+        },
+      };
+
+      // Optional partial-refund amount, IN CENTS. Omit for a full refund.
+      if (typeof amount === 'number' && Number.isFinite(amount) && amount > 0) {
+        refundParams.amount = Math.round(amount);
+      }
+
+      const allowedReasons = ['duplicate', 'fraudulent', 'requested_by_customer'];
+      refundParams.reason = allowedReasons.includes(String(reason))
+        ? (reason as Stripe.RefundCreateParams.Reason)
+        : 'requested_by_customer';
+
+      // Connect destination charge → pull the money back from the pro and the
+      // platform so the client is made whole.
+      if (hasTransfer) refundParams.reverse_transfer = true;
+      if (hasAppFee) refundParams.refund_application_fee = true;
+
+      const refund = await stripe.refunds.create(refundParams);
+
+      const amountCents =
+        typeof refund.amount === 'number' ? refund.amount : pi.amount || 0;
+      const amountDollars = Math.round(amountCents) / 100;
+
+      // Authoritative server-side write of the refunded state. The client also
+      // mirrors this optimistically; both writes are idempotent (same values).
+      if (orderId) {
+        try {
+          await db
+            .collection('gig_orders')
+            .doc(orderId)
+            .set(
+              {
+                status: 'cancelled',
+                payment_status: 'refunded',
+                stripe_refund_id: refund.id,
+                refund_amount: amountDollars,
+                refund_reason: cleanNote || null,
+                refund_initiated_by: initiatedBy || null,
+                refunded_at: admin.firestore.FieldValue.serverTimestamp(),
+                updated_at: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
+        } catch (e: any) {
+          console.warn(
+            `[refundGigOrder] order doc update failed for ${orderId} (refund still succeeded):`,
+            e?.message
+          );
+        }
+      }
+
+      console.log(
+        `[refundGigOrder] refund ${refund.id} status=${refund.status} PI=${paymentIntentId} amountCents=${amountCents} reverseTransfer=${hasTransfer} refundAppFee=${hasAppFee}`
+      );
+
+      res.status(200).json({
+        ok: true,
+        refundId: refund.id,
+        status: refund.status,
+        amount: amountDollars,
+        amountCents,
+        currency: refund.currency,
+        reversedTransfer: hasTransfer,
+        refundedApplicationFee: hasAppFee,
+      });
+    } catch (err: any) {
+      console.error('[refundGigOrder] Error:', err);
+      if (err?.type && typeof err.type === 'string' && err.type.startsWith('Stripe')) {
+        res.status(err.statusCode || 400).json({
+          ok: false,
+          error: err.message || 'Stripe error',
+          code: err.code,
+          type: err.type,
+        });
+        return;
+      }
+      res.status(500).json({
+        ok: false,
+        error: err?.message || 'Internal server error creating refund.',
+      });
+    }
+  });
+});
+
+
+/**
+ * onReviewWrite — recompute a professional's aggregate rating + review_count
+ * whenever a review is created, edited, or deleted.
+ *
+ * Reviewers don't own the `professionals/{id}` doc, so the client cannot write
+ * the aggregate fields itself (Firestore rules block cross-user writes). This
+ * trigger does it with the admin SDK, keeping the directory cards and profile
+ * header in sync. It only writes to the professionals doc (never back to
+ * reviews) so there is no trigger loop.
+ */
+export const onReviewWrite = functions.firestore
+  .document('reviews/{reviewId}')
+  .onWrite(async (change) => {
+    const after = change.after.exists ? change.after.data() : null;
+    const before = change.before.exists ? change.before.data() : null;
+    const professionalId: string | undefined =
+      (after?.professional_id as string) || (before?.professional_id as string);
+
+    if (!professionalId) return null;
+
+    try {
+      const snap = await db
+        .collection('reviews')
+        .where('professional_id', '==', professionalId)
+        .get();
+
+      let count = 0;
+      let sum = 0;
+      snap.forEach((d) => {
+        const r = Number(d.data()?.rating);
+        if (Number.isFinite(r) && r > 0) {
+          count += 1;
+          sum += r;
+        }
+      });
+
+      const rating = count > 0 ? Math.round((sum / count) * 10) / 10 : 0;
+
+      await db.collection('professionals').doc(professionalId).set(
+        {
+          rating,
+          review_count: count,
+          updated_at: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      console.log(
+        `[onReviewWrite] professional ${professionalId} → rating=${rating} review_count=${count}`
+      );
+    } catch (e: any) {
+      console.error(
+        `[onReviewWrite] failed to recompute rating for ${professionalId}:`,
+        e?.message || e
+      );
+    }
+    return null;
+  });
+
+
+/**
+ * onReviewVoteWrite — recompute helpful_count / not_helpful_count on a review
+ * whenever a `review_votes/{voteId}` doc is created, changed, or deleted.
+ *
+ * Users can only write their OWN vote doc (enforced by rules), so the running
+ * tallies on the review are maintained here with the admin SDK instead of
+ * granting every voter write access to the review doc.
+ */
+export const onReviewVoteWrite = functions.firestore
+  .document('review_votes/{voteId}')
+  .onWrite(async (change) => {
+    const after = change.after.exists ? change.after.data() : null;
+    const before = change.before.exists ? change.before.data() : null;
+    const reviewId: string | undefined =
+      (after?.review_id as string) || (before?.review_id as string);
+
+    if (!reviewId) return null;
+
+    try {
+      const snap = await db
+        .collection('review_votes')
+        .where('review_id', '==', reviewId)
+        .get();
+
+      let helpful = 0;
+      let notHelpful = 0;
+      snap.forEach((d) => {
+        const t = d.data()?.vote_type;
+        if (t === 'helpful') helpful += 1;
+        else if (t === 'not_helpful') notHelpful += 1;
+      });
+
+      await db.collection('reviews').doc(reviewId).set(
+        {
+          helpful_count: helpful,
+          not_helpful_count: notHelpful,
+          updated_at: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      console.log(
+        `[onReviewVoteWrite] review ${reviewId} → helpful=${helpful} not_helpful=${notHelpful}`
+      );
+    } catch (e: any) {
+      console.error(
+        `[onReviewVoteWrite] failed to recompute votes for ${reviewId}:`,
+        e?.message || e
+      );
+    }
+    return null;
+  });
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PHASE 4 — RECURRING MEMBERSHIP SUBSCRIPTIONS
+//
+// Two HTTPS endpoints that put membership billing on Stripe's recurring rails:
+//
+//   createSubscriptionCheckout — creates a Stripe Checkout Session in
+//     `subscription` mode for a given tier, attaching
+//     subscription_data.metadata.{professional_id, membership_tier} so the
+//     existing stripeWebhook customer.subscription.* handlers flip the
+//     professionals/{id} doc on every renewal / cancellation. Returns the
+//     hosted Checkout URL.
+//
+//   createBillingPortalSession — opens the Stripe Customer Portal so a member
+//     can update their card, view invoices, or cancel — no custom billing UI
+//     to maintain.
+//
+// The recurring Price IDs live in Stripe (one Product + recurring Price per
+// tier). Set them once so no redeploy is needed to retune pricing:
+//
+//   firebase functions:config:set \
+//     stripe.price_associate="price_..." \
+//     stripe.price_professional="price_..." \
+//     stripe.price_premier="price_..." \
+//     stripe.price_service_bureau="price_..."
+//
+// (Env-var fallbacks STRIPE_PRICE_ASSOCIATE / _PROFESSIONAL / _PREMIER /
+//  _SERVICE_BUREAU are read for local emulator runs.)
+// ═════════════════════════════════════════════════════════════════════════════
+
+type SubscriptionTier = 'associate' | 'professional' | 'premier' | 'service_bureau';
+
+const TIER_DISPLAY_NAME: Record<SubscriptionTier, string> = {
+  associate: 'Associate (Entry Level)',
+  professional: 'Professional',
+  premier: 'Premier Partner',
+  service_bureau: 'Service Bureau Partner',
+};
+
+/** Resolve the recurring Stripe Price ID for a tier from config / env. */
+function resolveSubscriptionPriceId(tier: SubscriptionTier): string | null {
+  const cfg = functions.config() as Record<string, any>;
+  const fromConfig = cfg?.stripe?.[`price_${tier}`];
+  const fromEnv = process.env[`STRIPE_PRICE_${tier.toUpperCase()}`];
+  const priceId = fromConfig || fromEnv || null;
+  return typeof priceId === 'string' && priceId.startsWith('price_') ? priceId : null;
+}
+
+/**
+ * Find-or-create the Stripe Customer for a professional and mirror the id onto
+ * professionals/{id}.stripeCustomerId so subsequent checkouts + the billing
+ * portal reuse the same customer.
+ */
+async function resolveStripeCustomer(
+  stripe: Stripe,
+  professionalId: string,
+  email?: string,
+  name?: string
+): Promise<string> {
+  const ref = db.collection('professionals').doc(professionalId);
+  try {
+    const snap = await ref.get();
+    const existing = snap.exists ? (snap.data()?.stripeCustomerId as string | undefined) : undefined;
+    if (existing && existing.startsWith('cus_')) return existing;
+  } catch (e) {
+    console.warn('[subscriptions] could not read professional for customer lookup:', e);
+  }
+
+  const customer = await stripe.customers.create({
+    ...(email ? { email } : {}),
+    ...(name ? { name } : {}),
+    metadata: { professional_id: professionalId },
+  });
+  try {
+    await ref.set({ stripeCustomerId: customer.id }, { merge: true });
+  } catch (e) {
+    console.warn('[subscriptions] could not persist stripeCustomerId:', e);
+  }
+  return customer.id;
+}
+
+export const createSubscriptionCheckout = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      if (req.method !== 'POST') {
+        res.status(405).json({ ok: false, error: 'Method not allowed. Use POST.' });
+        return;
+      }
+
+      const cfg = functions.config() as Record<string, any>;
+      const [ns, field] = STRIPE_SECRET_CONFIG_KEY.split('.');
+      const stripeSecret = cfg?.[ns]?.[field] || process.env.STRIPE_SECRET_KEY;
+      if (!stripeSecret) {
+        res.status(500).json({
+          ok: false,
+          configKey: STRIPE_SECRET_CONFIG_KEY,
+          error:
+            'Stripe is not configured on the server. Set it with: ' +
+            `firebase functions:config:set ${STRIPE_SECRET_CONFIG_KEY}="sk_live_..."`,
+        });
+        return;
+      }
+
+      const stripe = new Stripe(stripeSecret, { apiVersion: '2023-10-16', typescript: true });
+
+      const {
+        tier,
+        professionalId,
+        email,
+        name,
+        successUrl,
+        cancelUrl,
+      } = (req.body || {}) as {
+        tier?: SubscriptionTier;
+        professionalId?: string;
+        email?: string;
+        name?: string;
+        successUrl?: string;
+        cancelUrl?: string;
+      };
+
+      if (!tier || !TIER_DISPLAY_NAME[tier]) {
+        res.status(400).json({ ok: false, error: 'A valid "tier" is required.' });
+        return;
+      }
+      if (!professionalId) {
+        res.status(400).json({ ok: false, error: '"professionalId" is required.' });
+        return;
+      }
+
+      const priceId = resolveSubscriptionPriceId(tier);
+      if (!priceId) {
+        res.status(400).json({
+          ok: false,
+          code: 'PRICE_NOT_CONFIGURED',
+          error:
+            `No recurring Stripe Price configured for the "${tier}" tier. Set it with: ` +
+            `firebase functions:config:set stripe.price_${tier}="price_..."`,
+        });
+        return;
+      }
+
+      const customerId = await resolveStripeCustomer(stripe, professionalId, email, name);
+
+      const origin =
+        (req.headers.origin as string) ||
+        'https://refund-connect-1m30.web.app';
+      const metadata = { professional_id: professionalId, membership_tier: tier };
+
+      const session = await stripe.checkout.sessions.create({
+        mode: 'subscription',
+        customer: customerId,
+        line_items: [{ price: priceId, quantity: 1 }],
+        // The webhook keys off subscription.metadata, so stamp it on the
+        // subscription itself (not just the session).
+        subscription_data: { metadata },
+        metadata,
+        allow_promotion_codes: true,
+        success_url:
+          successUrl ||
+          `${origin}/member-portal?tab=billing&subscription=success`,
+        cancel_url: cancelUrl || `${origin}/pricing?subscription=cancelled`,
+      });
+
+      res.status(200).json({ ok: true, url: session.url, sessionId: session.id });
+    } catch (err: any) {
+      console.error('[createSubscriptionCheckout] error:', err);
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to start subscription checkout.' });
+    }
+  });
+});
+
+export const createBillingPortalSession = functions.https.onRequest((req, res) => {
+  cors(req, res, async () => {
+    try {
+      if (req.method !== 'POST') {
+        res.status(405).json({ ok: false, error: 'Method not allowed. Use POST.' });
+        return;
+      }
+
+      const cfg = functions.config() as Record<string, any>;
+      const [ns, field] = STRIPE_SECRET_CONFIG_KEY.split('.');
+      const stripeSecret = cfg?.[ns]?.[field] || process.env.STRIPE_SECRET_KEY;
+      if (!stripeSecret) {
+        res.status(500).json({
+          ok: false,
+          configKey: STRIPE_SECRET_CONFIG_KEY,
+          error: 'Stripe is not configured on the server.',
+        });
+        return;
+      }
+
+      const stripe = new Stripe(stripeSecret, { apiVersion: '2023-10-16', typescript: true });
+
+      const { professionalId, customerId, returnUrl } = (req.body || {}) as {
+        professionalId?: string;
+        customerId?: string;
+        returnUrl?: string;
+      };
+
+      let resolvedCustomer = customerId && customerId.startsWith('cus_') ? customerId : '';
+      if (!resolvedCustomer && professionalId) {
+        const snap = await db.collection('professionals').doc(professionalId).get();
+        const stored = snap.exists ? (snap.data()?.stripeCustomerId as string | undefined) : undefined;
+        if (stored && stored.startsWith('cus_')) resolvedCustomer = stored;
+      }
+
+      if (!resolvedCustomer) {
+        res.status(400).json({
+          ok: false,
+          code: 'NO_CUSTOMER',
+          error:
+            'No Stripe customer on file for this account. Start a subscription first, then manage billing here.',
+        });
+        return;
+      }
+
+      const origin = (req.headers.origin as string) || 'https://refund-connect-1m30.web.app';
+      const session = await stripe.billingPortal.sessions.create({
+        customer: resolvedCustomer,
+        return_url: returnUrl || `${origin}/member-portal?tab=billing`,
+      });
+
+      res.status(200).json({ ok: true, url: session.url });
+    } catch (err: any) {
+      console.error('[createBillingPortalSession] error:', err);
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to open billing portal.' });
+    }
+  });
+});
+
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PHASE 2 — APPOINTMENT REMINDER CRON
+//
+// Scheduled function that emails clients a reminder for appointments happening
+// within the next ~36 hours. Dedups by stamping `reminder_sent_at` on the
+// appointment doc (admin SDK bypasses rules). Mirrors the onboardingReminderCron
+// delivery pattern: best-effort Gmail send + enqueue into the `mail` collection
+// (Firebase Trigger Email extension).
+// ═════════════════════════════════════════════════════════════════════════════
+export const appointmentReminderCron = functions.pubsub
+  .schedule('every 6 hours')
+  .timeZone('UTC')
+  .onRun(async () => {
+    const now = Date.now();
+    const WINDOW_MS = 36 * 60 * 60 * 1000; // remind for appts in the next 36h
+
+    const gmailUser = functions.config().gmail?.user || process.env.GMAIL_USER;
+    const gmailPassword =
+      functions.config().gmail?.password || process.env.GMAIL_APP_PASSWORD;
+    let transporter: nodemailer.Transporter | null = null;
+    if (gmailUser && gmailPassword) {
+      transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: { user: gmailUser, pass: gmailPassword },
+      });
+    }
+
+    let scanned = 0;
+    let sent = 0;
+
+    try {
+      // Upcoming, still-active appointments only.
+      const snap = await db
+        .collection('appointments')
+        .where('status', 'in', ['pending', 'confirmed'])
+        .get();
+      scanned = snap.size;
+
+      for (const docSnap of snap.docs) {
+        const data = docSnap.data() || {};
+        if (data.reminder_sent_at) continue; // already reminded
+
+        const email = typeof data.client_email === 'string' ? data.client_email : '';
+        if (!email || !/.+@.+\..+/.test(email)) continue;
+
+        // Resolve the appointment start as a timestamp.
+        const dateStr = String(data.appointment_date || '');
+        const timeStr = String(data.start_time || '09:00');
+        if (!dateStr) continue;
+        const startMs = Date.parse(`${dateStr}T${timeStr.length >= 5 ? timeStr.slice(0, 5) : '09:00'}:00`);
+        if (!Number.isFinite(startMs)) continue;
+
+        // Only remind for appointments inside the [now, now+36h] window.
+        if (startMs < now || startMs > now + WINDOW_MS) continue;
+
+        const name = data.client_name || 'there';
+        const proName = data.professional_name || data.pro_name || 'your tax professional';
+        const service = data.service_type ? ` for ${data.service_type}` : '';
+        const whenLabel = new Date(startMs).toLocaleString('en-US', {
+          dateStyle: 'full',
+          timeStyle: 'short',
+        });
+
+        const subject = `Reminder: your appointment with ${proName}`;
+        const html =
+          `<!DOCTYPE html><html><body style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px">` +
+          `<div style="background:${PLATFORM_ACCENT};color:#fff;padding:24px;text-align:center;border-radius:8px 8px 0 0"><h1 style="margin:0">Appointment reminder</h1></div>` +
+          `<div style="background:#f9fafb;padding:24px;border:1px solid #e5e7eb">` +
+          `<p>Hi ${name},</p>` +
+          `<p>This is a friendly reminder of your upcoming appointment with <strong>${proName}</strong>${service}.</p>` +
+          `<div style="background:#fff;border-left:4px solid ${PLATFORM_ACCENT};padding:14px 18px;margin:16px 0;border-radius:4px"><strong>${whenLabel}</strong></div>` +
+          `<p>If you need to reschedule, reply to this email or message your pro in the ${PLATFORM_BRAND} portal.</p>` +
+          `</div></body></html>`;
+        const text =
+          `Hi ${name},\n\nReminder: your appointment with ${proName}${service} is scheduled for ${whenLabel}.\n\n` +
+          `Need to reschedule? Message your pro in the ${PLATFORM_BRAND} portal.\n`;
+
+        if (transporter) {
+          try {
+            await transporter.sendMail({
+              from: `${PLATFORM_BRAND} <${gmailUser}>`,
+              to: email,
+              subject,
+              html,
+              text,
+            });
+          } catch (e: any) {
+            console.warn(`[appointmentReminderCron] gmail send failed for ${email}:`, e?.message);
+          }
+        }
+        try {
+          await db.collection('mail').add({
+            to: email,
+            message: { subject, html, text },
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          });
+        } catch (e: any) {
+          console.warn(`[appointmentReminderCron] mail enqueue failed for ${email}:`, e?.message);
+        }
+
+        // Dedup stamp so we never double-remind the same appointment.
+        try {
+          await docSnap.ref.set(
+            { reminder_sent_at: admin.firestore.FieldValue.serverTimestamp() },
+            { merge: true }
+          );
+          sent++;
+        } catch (e: any) {
+          console.warn(`[appointmentReminderCron] could not stamp reminder for ${docSnap.id}:`, e?.message);
+        }
+      }
+
+      console.log(`[appointmentReminderCron] scanned=${scanned} sent=${sent}`);
+    } catch (e: any) {
+      console.error('[appointmentReminderCron] failed:', e?.message || e);
+    }
+    return null;
+  });

@@ -69,6 +69,29 @@ service firebase.storage {
                     && firestore.get(/databases/(default)/documents/gig_orders/$(orderId)).data.pro_id == request.auth.uid;
     }
 
+    // ── Resource Center assets (Phase 3) ───────────────────────────────
+    // Admin-published library files (training, guides, compliance docs,
+    // marketing assets, video, forms/checklists, manuals) live under:
+    //   resources/{resourceId}/{filename}
+    //
+    // Any signed-in user can read (the pro-facing library tier-gates access in
+    // the app + the matching Firestore `resources` doc). ONLY admins —
+    // users/{uid}.role == 'admin' — may upload (≤ 50 MB) or delete. We
+    // cross-check the caller's users doc via firestore.get.
+    //
+    // Note: `request.resource` is null on delete, so the size cap lives only on
+    // the write rule.
+    match /resources/{resourceId}/{fileName} {
+      allow read: if request.auth != null;
+
+      allow write: if request.auth != null
+                   && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'admin'
+                   && request.resource.size < 50 * 1024 * 1024;
+
+      allow delete: if request.auth != null
+                    && firestore.get(/databases/(default)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
     // ── Gig-order source documents (client-uploaded) ───────────────────
     // Mirror of the deliverables block, but for the CLIENT side: when a
     // client opens an order in 'new' or 'awaiting_payment' status, they

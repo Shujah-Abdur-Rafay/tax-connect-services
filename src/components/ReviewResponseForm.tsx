@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
-import { supabase } from '@/lib/supabase';
+import { respondToReview } from '@/services/reviewsService';
 import { toast } from 'sonner';
 
 interface ReviewResponseFormProps {
@@ -25,15 +25,7 @@ export function ReviewResponseForm({ reviewId, onSuccess, onCancel }: ReviewResp
     setIsSubmitting(true);
 
     try {
-      const { error } = await supabase
-        .from('reviews')
-        .update({
-          professional_response: response,
-          professional_response_date: new Date().toISOString()
-        })
-        .eq('id', reviewId);
-
-      if (error) throw error;
+      await respondToReview(reviewId, response);
 
       toast.success('Response submitted successfully!');
       onSuccess();
