@@ -4,7 +4,8 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Check, ArrowUpCircle, ArrowDownCircle, XCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
-import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { openBillingPortal } from '@/services/subscriptionService';
 
 interface Plan {
   id: string;
@@ -20,79 +21,48 @@ const plans: Plan[] = [
 ];
 
 const SubscriptionManager: React.FC = () => {
-  const [currentPlan, setCurrentPlan] = useState('professional');
+  // Display-only "current plan" highlight. The authoritative plan/cancellation
+  // state lives in Stripe and is surfaced via the Customer Portal below.
+  const [currentPlan] = useState('professional');
   const [loading, setLoading] = useState<string | null>(null);
   const { toast } = useToast();
+  const { user } = useAuth();
 
-  const handleUpgrade = async (planId: string) => {
-    setLoading(planId);
-    try {
-      const { data, error } = await supabase.functions.invoke('manage-subscription', {
-        body: { action: 'upgrade', newPlanId: planId },
-      });
-
-      if (error) throw error;
-
-      setCurrentPlan(planId);
+  // All plan changes AND cancellation are handled by the Stripe Customer Portal
+  // — the Stripe-recommended way for members to upgrade/downgrade/cancel and
+  // manage their card & invoices. We open it via the Firebase Cloud Function
+  // `createBillingPortalSession` (subscriptionService.openBillingPortal). No
+  // custom subscription endpoints, no Supabase.
+  const openPortal = async (key: string) => {
+    if (!user?.uid) {
       toast({
-        title: 'Plan Upgraded',
-        description: `Successfully upgraded to ${plans.find(p => p.id === planId)?.name} plan!`
+        title: 'Please sign in',
+        description: 'You need to be signed in to manage your subscription.',
+        variant: 'destructive',
       });
-    } catch (error: any) {
-      toast({
-        title: 'Upgrade Failed',
-        description: error.message,
-        variant: 'destructive'
-      });
-    } finally {
-      setLoading(null);
+      return;
     }
-  };
-
-  const handleDowngrade = async (planId: string) => {
-    setLoading(planId);
+    setLoading(key);
     try {
-      const { data, error } = await supabase.functions.invoke('manage-subscription', {
-        body: { action: 'downgrade', newPlanId: planId },
-      });
-
-      if (error) throw error;
-
-      setCurrentPlan(planId);
-      toast({
-        title: 'Plan Changed',
-        description: `Successfully changed to ${plans.find(p => p.id === planId)?.name} plan!`
-      });
-    } catch (error: any) {
-      toast({
-        title: 'Change Failed',
-        description: error.message,
-        variant: 'destructive'
-      });
-    } finally {
-      setLoading(null);
-    }
-  };
-
-  const handleCancel = async () => {
-    setLoading('cancel');
-    try {
-      const { data, error } = await supabase.functions.invoke('manage-subscription', {
-        body: { action: 'cancel' },
-      });
-
-      if (error) throw error;
-
-      toast({
-        title: 'Subscription Cancelled',
-        description: 'Your subscription will remain active until the end of the billing period.'
-      });
-    } catch (error: any) {
-      toast({
-        title: 'Cancellation Failed',
-        description: error.message,
-        variant: 'destructive'
-      });
+      const res = await openBillingPortal({ professionalId: user.uid });
+      if (res.ok && res.url) {
+        window.location.href = res.url;
+        return; // browser is navigating to Stripe
+      }
+      if (res.code === 'NO_CUSTOMER') {
+        toast({
+          title: 'No active subscription',
+          description:
+            'Start a subscription from the Pricing page first, then manage it here.',
+          variant: 'destructive',
+        });
+      } else {
+        toast({
+          title: 'Could not open billing',
+          description: res.error || 'Please try again in a moment.',
+          variant: 'destructive',
+        });
+      }
     } finally {
       setLoading(null);
     }
@@ -122,9 +92,7 @@ const SubscriptionManager: React.FC = () => {
               
               {currentPlan !== plan.id && (
                 <Button
-                  onClick={() => plans.findIndex(p => p.id === plan.id) > plans.findIndex(p => p.id === currentPlan) 
-                    ? handleUpgrade(plan.id) 
-                    : handleDowngrade(plan.id)}
+                  onClick={() => openPortal(plan.id)}
                   className="w-full"
                   disabled={loading === plan.id}
                 >
@@ -147,7 +115,7 @@ const SubscriptionManager: React.FC = () => {
           <p className="text-gray-600 mb-4">
             Cancel your subscription at any time. You'll continue to have access until the end of your billing period.
           </p>
-          <Button variant="destructive" onClick={handleCancel} disabled={loading === 'cancel'}>
+          <Button variant="destructive" onClick={() => openPortal('cancel')} disabled={loading === 'cancel'}>
             <XCircle className="mr-2 h-4 w-4" />
             {loading === 'cancel' ? 'Processing...' : 'Cancel Subscription'}
           </Button>

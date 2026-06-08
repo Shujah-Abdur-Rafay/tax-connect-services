@@ -3,10 +3,10 @@
 // =============================================================================
 //
 // This file loads Stripe.js exactly once and exports a shared `stripePromise`
-// that every payment surface (BookingPaymentForm, PaymentForm, MembershipCard,
-// etc.) re-uses. Server-side charges happen in the Supabase edge functions
-// (create-payment-intent, create-subscription, create-booking-payment) which
-// already read STRIPE_SECRET_KEY from the project's secrets.
+// that every payment surface (BookingPaymentForm, PaymentForm, MembershipPaymentStep,
+// etc.) re-uses. Server-side charges happen in the Firebase Cloud Functions
+// (createTaxProPayment, createSubscriptionCheckout, stripeConnect, refundGigOrder)
+// which read STRIPE_SECRET_KEY from functions/.env (or `firebase functions:config`).
 //
 // -----------------------------------------------------------------------------
 // SETUP (3 STEPS)
@@ -16,11 +16,11 @@
 //
 // 2. Add it to your local `.env` file (and to your hosting provider's env vars
 //    for production):
-//      VITE_STRIPE_PUBLISHABLE_KEY=pk_live_XXXXXXXXXXXXXXXXXXXXXXXX
+//      VITE_STRIPE_PUBLISHABLE_KEY=pk_test_XXXXXXXXXXXXXXXXXXXXXXXX
 //
-// 3. The SECRET key (`sk_live_…` / `sk_test_…`) is already wired up server-side
-//    as the `STRIPE_SECRET_KEY` Supabase secret. Do NOT put it here — secret
-//    keys must never ship in the browser bundle.
+// 3. The SECRET key (`sk_live_…` / `sk_test_…`) is wired up server-side as
+//    STRIPE_SECRET_KEY in functions/.env. Do NOT put it here — secret keys
+//    must never ship in the browser bundle.
 // -----------------------------------------------------------------------------
 
 import { loadStripe, type Stripe } from '@stripe/stripe-js';

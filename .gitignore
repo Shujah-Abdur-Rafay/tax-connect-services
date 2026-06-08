@@ -22,3 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Local env files — contain real API keys / secrets. NEVER commit these.
+# (.env.example / functions/.env.example are the committed placeholder templates.)
+.env
+.env.*
+!.env.example
+functions/.env
+functions/.env.*
+!functions/.env.example

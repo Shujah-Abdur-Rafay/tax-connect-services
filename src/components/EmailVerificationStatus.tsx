@@ -1,41 +1,85 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Mail, CheckCircle, XCircle, RefreshCw } from 'lucide-react';
 import { auth } from '@/lib/firebase';
-import { resendVerificationEmail, checkEmailVerified } from '@/services/emailVerificationService';
+import {
+  resendVerificationEmail,
+  checkEmailVerified,
+  verificationErrorMessage,
+} from '@/services/emailVerificationService';
+
+// Seconds the resend button stays disabled after a successful send. Keeps the
+// user from hammering Firebase and tripping auth/too-many-requests.
+const RESEND_COOLDOWN = 60;
 
 export const EmailVerificationStatus: React.FC = () => {
   const [isVerified, setIsVerified] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [message, setMessage] = useState('');
+  const [isResending, setIsResending] = useState(false);
+  const [isChecking, setIsChecking] = useState(false);
+  const [cooldown, setCooldown] = useState(0);
+  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const user = auth.currentUser;
 
-  useEffect(() => {
-    checkVerification();
-  }, []);
-
-  const checkVerification = async () => {
+  const refreshStatus = useCallback(async () => {
     if (user) {
       const verified = await checkEmailVerified(user);
       setIsVerified(verified);
+      return verified;
     }
-  };
+    return false;
+  }, [user]);
+
+  useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  // Tick down the resend cooldown.
+  useEffect(() => {
+    if (cooldown <= 0) return;
+    const t = setTimeout(() => setCooldown((s) => s - 1), 1000);
+    return () => clearTimeout(t);
+  }, [cooldown]);
 
   const handleResend = async () => {
     if (!user) return;
-    
-    setIsLoading(true);
-    setMessage('');
-    
+    setIsResending(true);
+    setMessage(null);
     try {
       await resendVerificationEmail(user);
-      setMessage('Verification email sent! Please check your inbox.');
+      setMessage({ type: 'success', text: 'Verification email sent! Please check your inbox.' });
+      setCooldown(RESEND_COOLDOWN);
     } catch (error: any) {
-      setMessage(error.message || 'Failed to send verification email');
+      // resendVerificationEmail throws a plain Error("already verified"); other
+      // failures are FirebaseErrors with a .code we translate for the user.
+      if (error?.message === 'Your email is already verified.') {
+        setIsVerified(true);
+        setMessage({ type: 'success', text: 'Your email is already verified.' });
+      } else {
+        setMessage({ type: 'error', text: verificationErrorMessage(error) });
+      }
     } finally {
-      setIsLoading(false);
+      setIsResending(false);
+    }
+  };
+
+  const handleCheck = async () => {
+    if (!user) return;
+    setIsChecking(true);
+    setMessage(null);
+    try {
+      const verified = await refreshStatus();
+      if (!verified) {
+        setMessage({
+          type: 'error',
+          text: "Still not verified. Click the link in the email, then check again.",
+        });
+      }
+    } catch (error: any) {
+      setMessage({ type: 'error', text: verificationErrorMessage(error) });
+    } finally {
+      setIsChecking(false);
     }
   };
 
@@ -74,29 +118,43 @@ export const EmailVerificationStatus: React.FC = () => {
           <div className="space-y-3">
             <Alert>
               <AlertDescription>
-                Please verify your email to access all features.
+                Please verify your email to access all features. We'll email you a secure link —
+                click it, then use "I've verified my email" below.
               </AlertDescription>
             </Alert>
-            <Button 
-              onClick={handleResend} 
-              disabled={isLoading}
+
+            <Button
+              onClick={handleResend}
+              disabled={isResending || cooldown > 0}
               className="w-full"
             >
-              <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
-              Resend Verification Email
+              <RefreshCw className={`w-4 h-4 mr-2 ${isResending ? 'animate-spin' : ''}`} />
+              {isResending
+                ? 'Sending...'
+                : cooldown > 0
+                  ? `Resend available in ${cooldown}s`
+                  : 'Resend Verification Email'}
             </Button>
+
+            <Button
+              variant="outline"
+              onClick={handleCheck}
+              disabled={isChecking}
+              className="w-full"
+            >
+              <CheckCircle className={`w-4 h-4 mr-2 ${isChecking ? 'animate-spin' : ''}`} />
+              {isChecking ? 'Checking...' : "I've verified my email"}
+            </Button>
+
             <p className="text-xs text-gray-500 text-center">
-              Check your spam folder if you don't see the email. 
-              <br />
-              Having issues? See <a href="/FIREBASE_EMAIL_VERIFICATION_SETUP.md" target="_blank" className="text-blue-600 hover:underline">setup guide</a>.
+              Check your spam folder if you don't see the email within a few minutes.
             </p>
           </div>
         )}
 
-
         {message && (
-          <Alert>
-            <AlertDescription>{message}</AlertDescription>
+          <Alert variant={message.type === 'error' ? 'destructive' : 'default'}>
+            <AlertDescription>{message.text}</AlertDescription>
           </Alert>
         )}
       </CardContent>

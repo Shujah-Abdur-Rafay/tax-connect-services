@@ -26,10 +26,11 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.appointmentReminderCron = exports.createBillingPortalSession = exports.createSubscriptionCheckout = exports.onReviewVoteWrite = exports.onReviewWrite = exports.refundGigOrder = exports.onboardingReminderCron = exports.stripeHealth = exports.stripeConnect = exports.stripeWebhook = exports.verifyPaymentSplit = exports.createTaxProPayment = exports.getPaymentReceipt = exports.sendEmail = void 0;
+exports.appointmentReminderCron = exports.createBillingPortalSession = exports.createSubscriptionCheckout = exports.onReviewVoteWrite = exports.onReviewWrite = exports.refundGigOrder = exports.onboardingReminderCron = exports.stripeHealth = exports.stripeConnect = exports.stripeWebhook = exports.verifyPaymentSplit = exports.createTaxProPayment = exports.getPaymentReceipt = exports.onNotificationCreated = exports.processMailQueue = exports.requestEmailVerification = exports.sendEmail = void 0;
 const functions = __importStar(require("firebase-functions"));
 const admin = __importStar(require("firebase-admin"));
 const nodemailer = __importStar(require("nodemailer"));
+const resend_1 = require("resend");
 const stripe_1 = __importDefault(require("stripe"));
 const cors_1 = __importDefault(require("cors"));
 // ─────────────────────────────────────────────────────────────────────────────
@@ -222,14 +223,105 @@ const templates = {
         };
     }
 };
-exports.sendEmail = functions.https.onCall(async (data, context) => {
+// ─────────────────────────────────────────────────────────────────────────────
+// RESEND — the primary transport for EVERY notification email in the app.
+//
+// One place sends mail (sendViaResend). The API key and default "from" address
+// are read from environment / Firebase config so no secret is hardcoded:
+//
+//     functions/.env:
+//        RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxx
+//        RESEND_FROM=Refund Connect <notifications@your-domain.com>
+//
+//     or:  firebase functions:config:set resend.api_key="re_..." resend.from="..."
+//
+// RESEND_FROM MUST be a sender on a domain verified in the Resend dashboard,
+// otherwise Resend rejects the send.
+// ─────────────────────────────────────────────────────────────────────────────
+function getResendSettings() {
     var _a, _b;
-    const { type, emailData } = data || {};
+    const cfg = functions.config();
+    const apiKey = process.env.RESEND_API_KEY || ((_a = cfg === null || cfg === void 0 ? void 0 : cfg.resend) === null || _a === void 0 ? void 0 : _a.api_key) || '';
+    const from = process.env.RESEND_FROM ||
+        ((_b = cfg === null || cfg === void 0 ? void 0 : cfg.resend) === null || _b === void 0 ? void 0 : _b.from) ||
+        `${PLATFORM_BRAND} <notifications@refund-connect.com>`;
+    return { apiKey, from };
+}
+let resendClient = null;
+function getResendClient(apiKey) {
+    if (!resendClient) {
+        resendClient = new resend_1.Resend(apiKey);
+    }
+    return resendClient;
+}
+/**
+ * Send one email through Resend. Throws on failure so callers can decide
+ * whether to fall back (sendEmail) or just record the error (processMailQueue).
+ * Returns the Resend message id on success.
+ */
+async function sendViaResend(args) {
+    const { apiKey, from } = getResendSettings();
+    if (!apiKey) {
+        throw new Error('RESEND_API_KEY is not configured. Set it in functions/.env (RESEND_API_KEY=...) and redeploy.');
+    }
+    const resend = getResendClient(apiKey);
+    const { data, error } = await resend.emails.send(Object.assign(Object.assign(Object.assign(Object.assign({ from: args.from || from, to: args.to, subject: args.subject, html: args.html }, (args.text ? { text: args.text } : {})), (args.replyTo ? { replyTo: args.replyTo } : {})), (args.cc ? { cc: args.cc } : {})), (args.bcc ? { bcc: args.bcc } : {})));
+    if (error) {
+        throw new Error(error.message || 'Resend rejected the email.');
+    }
+    return (data === null || data === void 0 ? void 0 : data.id) || null;
+}
+/**
+ * Deliver a transactional email through Resend, falling back to Gmail SMTP when
+ * Resend isn't configured or rejects the send. Throws if NEITHER transport is
+ * available so callers can surface an actionable "configure email" error.
+ */
+async function deliverTransactionalEmail(args) {
+    var _a, _b;
+    const { apiKey } = getResendSettings();
+    if (apiKey) {
+        try {
+            const id = await sendViaResend(args);
+            return { via: 'resend', id };
+        }
+        catch (err) {
+            console.error('[deliverTransactionalEmail] Resend failed, trying Gmail:', (err === null || err === void 0 ? void 0 : err.message) || err);
+            // fall through to Gmail
+        }
+    }
     const gmailUser = ((_a = functions.config().gmail) === null || _a === void 0 ? void 0 : _a.user) || process.env.GMAIL_USER;
     const gmailPassword = ((_b = functions.config().gmail) === null || _b === void 0 ? void 0 : _b.password) || process.env.GMAIL_APP_PASSWORD;
-    if (!gmailUser || !gmailPassword) {
-        throw new functions.https.HttpsError('failed-precondition', 'Gmail credentials not configured');
+    if (gmailUser && gmailPassword) {
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: { user: gmailUser, pass: gmailPassword },
+        });
+        await transporter.sendMail(Object.assign({ from: `${PLATFORM_BRAND} <${gmailUser}>`, to: args.to, subject: args.subject, html: args.html }, (args.text ? { text: args.text } : {})));
+        return { via: 'gmail', id: null };
     }
+    throw new Error('No email provider configured. Set a real RESEND_API_KEY (re_...) with a verified RESEND_FROM domain, ' +
+        'OR GMAIL_USER + GMAIL_APP_PASSWORD, in functions/.env — then redeploy functions.');
+}
+/**
+ * Minimal branded HTML wrapper for plain-text notifications, used by the
+ * notifications → email bridge (onNotificationCreated).
+ */
+function buildNotificationEmailHtml(title, message, opts) {
+    const safeTitle = escapeHtmlServer(title || 'Notification');
+    const safeMsg = escapeHtmlServer(message || '');
+    const cta = (opts === null || opts === void 0 ? void 0 : opts.ctaUrl)
+        ? `<div style="text-align:center;margin:24px 0 4px"><a href="${opts.ctaUrl}" style="display:inline-block;background:${PLATFORM_PRIMARY};color:#fff;text-decoration:none;padding:12px 28px;border-radius:8px;font-weight:600">${escapeHtmlServer(opts.ctaLabel || 'View details')}</a></div>`
+        : '';
+    return `<!DOCTYPE html><html><body style="margin:0;padding:24px;background:#f3f4f6;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#111827">
+  <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:12px;overflow:hidden;border:1px solid #e5e7eb">
+    <div style="background:${PLATFORM_PRIMARY};color:#fff;padding:24px 28px"><h1 style="margin:0;font-size:20px;font-weight:700">${safeTitle}</h1></div>
+    <div style="padding:24px 28px"><p style="margin:0;line-height:1.6;color:#374151;white-space:pre-line">${safeMsg}</p>${cta}</div>
+    <div style="background:#111827;color:#9ca3af;padding:16px 28px;text-align:center;font-size:12px">© ${new Date().getFullYear()} ${PLATFORM_BRAND}</div>
+  </div></body></html>`;
+}
+exports.sendEmail = functions.https.onCall(async (data) => {
+    var _a, _b;
+    const { type, emailData } = data || {};
     const template = templates[type];
     if (!template) {
         throw new functions.https.HttpsError('invalid-argument', `Unknown notification type: ${type}`);
@@ -238,19 +330,245 @@ exports.sendEmail = functions.https.onCall(async (data, context) => {
         throw new functions.https.HttpsError('invalid-argument', 'emailData.recipientEmail is required');
     }
     const { subject, html } = template(emailData);
-    const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: { user: gmailUser, pass: gmailPassword }
-    });
+    // ── Primary transport: Resend ───────────────────────────────────────────
+    const { apiKey } = getResendSettings();
+    if (apiKey) {
+        try {
+            const id = await sendViaResend(Object.assign(Object.assign({ to: emailData.recipientEmail, subject,
+                html }, (emailData.replyTo ? { replyTo: emailData.replyTo } : {})), (emailData.bcc ? { bcc: emailData.bcc } : {})));
+            return { success: true, message: 'Email sent via Resend', type, id };
+        }
+        catch (error) {
+            console.error('[sendEmail] Resend send failed, trying Gmail fallback if configured:', error === null || error === void 0 ? void 0 : error.message);
+            // fall through to the Gmail fallback below
+        }
+    }
+    // ── Fallback transport: Gmail (legacy) ──────────────────────────────────
+    const gmailUser = ((_a = functions.config().gmail) === null || _a === void 0 ? void 0 : _a.user) || process.env.GMAIL_USER;
+    const gmailPassword = ((_b = functions.config().gmail) === null || _b === void 0 ? void 0 : _b.password) || process.env.GMAIL_APP_PASSWORD;
+    if (gmailUser && gmailPassword) {
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: { user: gmailUser, pass: gmailPassword },
+        });
+        try {
+            await transporter.sendMail(Object.assign(Object.assign(Object.assign({ from: `${PLATFORM_BRAND} <${gmailUser}>`, to: emailData.recipientEmail }, (emailData.replyTo ? { replyTo: emailData.replyTo } : {})), (emailData.bcc ? { bcc: emailData.bcc } : {})), { subject,
+                html }));
+            return { success: true, message: 'Email sent via Gmail (fallback)', type };
+        }
+        catch (error) {
+            console.error('Email error:', error);
+            throw new functions.https.HttpsError('internal', error.message);
+        }
+    }
+    throw new functions.https.HttpsError('failed-precondition', 'No email provider configured. Set RESEND_API_KEY (recommended) or Gmail credentials.');
+});
+/**
+ * requestEmailVerification — callable.
+ *
+ * Generates the Firebase verification LINK with the Admin SDK and delivers it
+ * through the app's email pipeline (Resend, Gmail fallback). The link still
+ * targets Firebase's hosted action handler, so clicking it flips the account's
+ * `emailVerified` flag — genuine Firebase email verification, delivered over a
+ * transport we control (no client rate limit).
+ */
+exports.requestEmailVerification = functions.https.onCall(async (data, context) => {
+    var _a;
+    const uid = (_a = context.auth) === null || _a === void 0 ? void 0 : _a.uid;
+    if (!uid) {
+        throw new functions.https.HttpsError('unauthenticated', 'You must be signed in to verify your email.');
+    }
+    const userRecord = await admin.auth().getUser(uid);
+    const email = userRecord.email;
+    if (!email) {
+        throw new functions.https.HttpsError('failed-precondition', 'Your account has no email address.');
+    }
+    if (userRecord.emailVerified) {
+        return { success: true, alreadyVerified: true };
+    }
+    // Domain must be an Authorized Domain (Auth → Settings); localhost + *.web.app
+    // / *.firebaseapp.com are authorized by default.
+    const continueUrl = (typeof (data === null || data === void 0 ? void 0 : data.continueUrl) === 'string' && data.continueUrl) ||
+        'https://refund-connect-1m30.web.app/member-portal';
+    let link;
     try {
-        await transporter.sendMail(Object.assign(Object.assign(Object.assign({ from: `${PLATFORM_BRAND} <${gmailUser}>`, to: emailData.recipientEmail }, (emailData.replyTo ? { replyTo: emailData.replyTo } : {})), (emailData.bcc ? { bcc: emailData.bcc } : {})), { subject,
-            html }));
-        return { success: true, message: 'Email sent successfully', type };
+        link = await admin.auth().generateEmailVerificationLink(email, {
+            url: continueUrl,
+            handleCodeInApp: false,
+        });
     }
-    catch (error) {
-        console.error('Email error:', error);
-        throw new functions.https.HttpsError('internal', error.message);
+    catch (err) {
+        console.error('[requestEmailVerification] generateEmailVerificationLink failed:', (err === null || err === void 0 ? void 0 : err.message) || err);
+        throw new functions.https.HttpsError('internal', `Could not generate the verification link: ${(err === null || err === void 0 ? void 0 : err.message) || 'unknown error'}`);
     }
+    const displayName = userRecord.displayName || 'there';
+    const html = buildNotificationEmailHtml('Verify your email', `Hi ${displayName},\n\nPlease confirm your email address to finish setting up your ${PLATFORM_BRAND} account. Click the button below — the link expires in a few hours.\n\nIf you didn't request this, you can safely ignore this email.`, { ctaUrl: link, ctaLabel: 'Verify my email' });
+    try {
+        const { via, id } = await deliverTransactionalEmail({
+            to: email,
+            subject: `Verify your email for ${PLATFORM_BRAND}`,
+            html,
+            text: `Verify your email for ${PLATFORM_BRAND} by opening this link:\n${link}`,
+        });
+        console.log(`[requestEmailVerification] sent verification to ${email} via ${via}`);
+        return { success: true, id };
+    }
+    catch (err) {
+        console.error('[requestEmailVerification] send failed:', (err === null || err === void 0 ? void 0 : err.message) || err);
+        throw new functions.https.HttpsError('failed-precondition', (err === null || err === void 0 ? void 0 : err.message) || 'Failed to send the verification email.');
+    }
+});
+/**
+ * processMailQueue
+ *
+ * THE single delivery chokepoint for every notification email in the app.
+ * Fires whenever a document is added to the Firestore `mail` collection — the
+ * queue written by firebaseEmailService.queueFirebaseEmail on the client, by
+ * the notifications→email bridge (onNotificationCreated) below, and by the
+ * reminder crons — and delivers it through Resend.
+ *
+ * Doc shape (compatible with the "Trigger Email" extension format already used
+ * across the app):
+ *   { to: string | string[], message: { subject, html?, text? },
+ *     cc?, bcc?, replyTo? }
+ *
+ * Idempotent: stamps `resendDelivery.state` so a function retry can never send
+ * the same email twice.
+ */
+exports.processMailQueue = functions.firestore
+    .document('mail/{mailId}')
+    .onCreate(async (snap) => {
+    var _a;
+    const data = snap.data() || {};
+    if ((_a = data.resendDelivery) === null || _a === void 0 ? void 0 : _a.state)
+        return null; // already processed
+    const message = data.message || {};
+    const to = data.to;
+    const subject = message.subject;
+    const html = message.html;
+    const text = message.text;
+    if (!to || !subject || (!html && !text)) {
+        await snap.ref.set({
+            resendDelivery: {
+                state: 'ERROR',
+                error: 'Mail doc is missing required `to`, `message.subject`, or a body.',
+                failedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+        }, { merge: true });
+        return null;
+    }
+    try {
+        const id = await sendViaResend(Object.assign(Object.assign(Object.assign(Object.assign({ to,
+            subject, 
+            // Resend requires html; synthesize it from text when only text exists.
+            html: html ||
+                `<pre style="font-family:inherit;white-space:pre-wrap">${escapeHtmlServer(text || '')}</pre>` }, (text ? { text } : {})), (data.replyTo ? { replyTo: data.replyTo } : {})), (data.cc ? { cc: data.cc } : {})), (data.bcc ? { bcc: data.bcc } : {})));
+        await snap.ref.set({
+            resendDelivery: {
+                state: 'SUCCESS',
+                messageId: id,
+                sentAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+        }, { merge: true });
+        console.log(`[processMailQueue] sent ${snap.id} via Resend (id=${id})`);
+    }
+    catch (err) {
+        console.error(`[processMailQueue] Resend send failed for ${snap.id}:`, (err === null || err === void 0 ? void 0 : err.message) || err);
+        await snap.ref.set({
+            resendDelivery: {
+                state: 'ERROR',
+                error: String((err === null || err === void 0 ? void 0 : err.message) || err || 'send failed'),
+                failedAt: admin.firestore.FieldValue.serverTimestamp(),
+            },
+        }, { merge: true });
+    }
+    return null;
+});
+/**
+ * onNotificationCreated
+ *
+ * Bridges the in-app notification feed to email. Whenever a document is added to
+ * `notifications/{id}` (createNotification on the client), this resolves the
+ * recipient's email from Firebase Auth — falling back to the professionals doc
+ * or an explicit email field — and enqueues a branded email into the `mail`
+ * collection, which processMailQueue then delivers via Resend.
+ *
+ * This guarantees EVERY notification the app raises also reaches the user by
+ * email, without having to touch the dozens of client call sites.
+ *
+ * Idempotent via the `emailQueued` flag stamped back onto the notification.
+ */
+exports.onNotificationCreated = functions.firestore
+    .document('notifications/{notifId}')
+    .onCreate(async (snap) => {
+    var _a;
+    const n = snap.data() || {};
+    if (n.emailQueued === true)
+        return null;
+    const userId = n.userId;
+    if (!userId) {
+        await snap.ref.set({ emailQueued: false, emailSkippedReason: 'no_user' }, { merge: true });
+        return null;
+    }
+    // Resolve the recipient email: explicit field → Auth → professionals doc.
+    let email = '';
+    if (typeof n.email === 'string' && n.email) {
+        email = n.email;
+    }
+    else if (n.metadata && typeof n.metadata.email === 'string' && n.metadata.email) {
+        email = n.metadata.email;
+    }
+    if (!email) {
+        try {
+            const u = await admin.auth().getUser(userId);
+            email = u.email || '';
+        }
+        catch (_e) {
+            /* user may not exist in Auth; try Firestore next */
+        }
+    }
+    if (!email) {
+        try {
+            const p = await db.collection('professionals').doc(userId).get();
+            if (p.exists)
+                email = ((_a = p.data()) === null || _a === void 0 ? void 0 : _a.email) || '';
+        }
+        catch (_e) {
+            /* non-fatal */
+        }
+    }
+    if (!email || !/.+@.+\..+/.test(email)) {
+        await snap.ref.set({ emailQueued: false, emailSkippedReason: 'no_email' }, { merge: true });
+        return null;
+    }
+    const subject = (typeof n.title === 'string' && n.title) || `Notification from ${PLATFORM_BRAND}`;
+    const messageText = (typeof n.message === 'string' && n.message) || '';
+    const ctaUrl = n.metadata && typeof n.metadata.actionUrl === 'string'
+        ? n.metadata.actionUrl
+        : undefined;
+    try {
+        await db.collection('mail').add({
+            to: email,
+            message: {
+                subject,
+                html: buildNotificationEmailHtml(subject, messageText, ctaUrl ? { ctaUrl } : undefined),
+                text: messageText,
+            },
+            source: 'notification',
+            notificationId: snap.id,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        await snap.ref.set({
+            emailQueued: true,
+            emailQueuedAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        console.log(`[onNotificationCreated] queued email to ${email} for notification ${snap.id}`);
+    }
+    catch (err) {
+        console.error(`[onNotificationCreated] failed to queue email for ${snap.id}:`, (err === null || err === void 0 ? void 0 : err.message) || err);
+        await snap.ref.set({ emailQueued: false, emailSkippedReason: 'queue_failed' }, { merge: true });
+    }
+    return null;
 });
 /**
  * getPaymentReceipt
@@ -1445,16 +1763,14 @@ exports.stripeHealth = functions.https.onRequest((req, res) => {
 //   2. Keeps only drafts whose onboarding_draft.savedAt is OLDER than 48 hours
 //      (and not older than 30 days, so we never spam long-abandoned records).
 //   3. Skips anyone we've already reminded (dedup ledger: onboarding_reminders/{uid}).
-//   4. Emails a branded "Finish your Refund Connect application" reminder with a
-//      Resume link back to the onboarding page — sent via nodemailer (Gmail,
-//      already configured for sendEmail) AND mirrored into the `mail` collection
-//      so the Firebase Trigger Email extension also delivers it if installed.
+//   4. Enqueues a branded "Finish your Refund Connect application" reminder
+//      (with a Resume link back to the onboarding page) into the `mail`
+//      collection. processMailQueue then delivers it via Resend.
 //   5. Records onboarding_reminders/{uid} so the same pro is never reminded twice.
 //
 // Config (optional override of the resume link base):
 //   firebase functions:config:set app.onboarding_url="https://www.refund-connect.com/onboarding"
-// Requires the same Gmail creds already used by sendEmail:
-//   firebase functions:config:set gmail.user="..." gmail.password="..."
+// Email delivery requires RESEND_API_KEY (see getResendSettings / functions/.env).
 // ─────────────────────────────────────────────────────────────────────────────
 const REMINDER_BRAND = 'Refund Connect';
 const REMINDER_SUPPORT_EMAIL = 'support@refund-connect.com';
@@ -1550,23 +1866,13 @@ exports.onboardingReminderCron = functions.pubsub
     .schedule('every 6 hours')
     .timeZone('UTC')
     .onRun(async () => {
-    var _a, _b, _c, _d, _f;
+    var _a, _b, _c;
     const now = Date.now();
     const onboardingBaseUrl = ((_a = functions.config().app) === null || _a === void 0 ? void 0 : _a.onboarding_url) ||
         process.env.ONBOARDING_URL ||
         'https://www.refund-connect.com/onboarding';
-    const gmailUser = ((_b = functions.config().gmail) === null || _b === void 0 ? void 0 : _b.user) || process.env.GMAIL_USER;
-    const gmailPassword = ((_c = functions.config().gmail) === null || _c === void 0 ? void 0 : _c.password) || process.env.GMAIL_APP_PASSWORD;
-    let transporter = null;
-    if (gmailUser && gmailPassword) {
-        transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: gmailUser, pass: gmailPassword },
-        });
-    }
-    else {
-        console.warn('[onboardingReminderCron] Gmail creds not configured; will only queue into `mail` collection.');
-    }
+    // Delivery is centralized: we enqueue into the `mail` collection and
+    // processMailQueue sends every message via Resend. No direct SMTP here.
     let scanned = 0;
     let eligible = 0;
     let sent = 0;
@@ -1602,7 +1908,7 @@ exports.onboardingReminderCron = functions.pubsub
             }
             // Resolve recipient email + name.
             const email = (typeof data.email === 'string' && data.email) ||
-                (typeof ((_d = draft === null || draft === void 0 ? void 0 : draft.profile) === null || _d === void 0 ? void 0 : _d.email) === 'string' && draft.profile.email) ||
+                (typeof ((_b = draft === null || draft === void 0 ? void 0 : draft.profile) === null || _b === void 0 ? void 0 : _b.email) === 'string' && draft.profile.email) ||
                 '';
             if (!email || !/.+@.+\..+/.test(email)) {
                 // No usable email — record a skip so we don't re-scan it forever.
@@ -1614,7 +1920,7 @@ exports.onboardingReminderCron = functions.pubsub
                 continue;
             }
             const firstName = data.first_name ||
-                ((_f = draft === null || draft === void 0 ? void 0 : draft.profile) === null || _f === void 0 ? void 0 : _f.firstName) ||
+                ((_c = draft === null || draft === void 0 ? void 0 : draft.profile) === null || _c === void 0 ? void 0 : _c.firstName) ||
                 (typeof data.full_name === 'string' ? data.full_name.split(' ')[0] : '') ||
                 '';
             const step = typeof data.onboarding_step === 'number'
@@ -1629,28 +1935,12 @@ exports.onboardingReminderCron = functions.pubsub
                 resumeUrl,
                 stepLabel,
             });
-            let delivered = false;
-            // Path A: direct send via Gmail (proven path used by sendEmail).
-            if (transporter) {
-                try {
-                    await transporter.sendMail({
-                        from: `${REMINDER_BRAND} <${gmailUser}>`,
-                        to: email,
-                        subject,
-                        html,
-                        text,
-                    });
-                    delivered = true;
-                }
-                catch (e) {
-                    console.warn(`[onboardingReminderCron] nodemailer send failed for ${email}:`, e === null || e === void 0 ? void 0 : e.message);
-                }
-            }
-            // Path B: also enqueue into `mail` (Firebase Trigger Email extension).
+            // Enqueue into `mail`; processMailQueue delivers it via Resend.
             try {
                 await db.collection('mail').add({
                     to: email,
                     message: { subject, html, text },
+                    source: 'onboarding_reminder',
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 });
             }
@@ -1663,7 +1953,6 @@ exports.onboardingReminderCron = functions.pubsub
                 email,
                 stepReminded: step,
                 draftSavedAt: new Date(savedAtMs).toISOString(),
-                deliveredViaGmail: delivered,
                 status: 'sent',
                 createdAt: admin.firestore.FieldValue.serverTimestamp(),
             });
@@ -2085,26 +2374,17 @@ exports.createBillingPortalSession = functions.https.onRequest((req, res) => {
 //
 // Scheduled function that emails clients a reminder for appointments happening
 // within the next ~36 hours. Dedups by stamping `reminder_sent_at` on the
-// appointment doc (admin SDK bypasses rules). Mirrors the onboardingReminderCron
-// delivery pattern: best-effort Gmail send + enqueue into the `mail` collection
-// (Firebase Trigger Email extension).
+// appointment doc (admin SDK bypasses rules). Delivery is centralized: it
+// enqueues into the `mail` collection and processMailQueue sends via Resend.
 // ═════════════════════════════════════════════════════════════════════════════
 exports.appointmentReminderCron = functions.pubsub
     .schedule('every 6 hours')
     .timeZone('UTC')
     .onRun(async () => {
-    var _a, _b;
     const now = Date.now();
     const WINDOW_MS = 36 * 60 * 60 * 1000; // remind for appts in the next 36h
-    const gmailUser = ((_a = functions.config().gmail) === null || _a === void 0 ? void 0 : _a.user) || process.env.GMAIL_USER;
-    const gmailPassword = ((_b = functions.config().gmail) === null || _b === void 0 ? void 0 : _b.password) || process.env.GMAIL_APP_PASSWORD;
-    let transporter = null;
-    if (gmailUser && gmailPassword) {
-        transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: gmailUser, pass: gmailPassword },
-        });
-    }
+    // Delivery is centralized through the `mail` collection (sent via Resend by
+    // processMailQueue). No direct SMTP here.
     let scanned = 0;
     let sent = 0;
     try {
@@ -2150,24 +2430,11 @@ exports.appointmentReminderCron = functions.pubsub
                 `</div></body></html>`;
             const text = `Hi ${name},\n\nReminder: your appointment with ${proName}${service} is scheduled for ${whenLabel}.\n\n` +
                 `Need to reschedule? Message your pro in the ${PLATFORM_BRAND} portal.\n`;
-            if (transporter) {
-                try {
-                    await transporter.sendMail({
-                        from: `${PLATFORM_BRAND} <${gmailUser}>`,
-                        to: email,
-                        subject,
-                        html,
-                        text,
-                    });
-                }
-                catch (e) {
-                    console.warn(`[appointmentReminderCron] gmail send failed for ${email}:`, e === null || e === void 0 ? void 0 : e.message);
-                }
-            }
             try {
                 await db.collection('mail').add({
                     to: email,
                     message: { subject, html, text },
+                    source: 'appointment_reminder',
                     createdAt: admin.firestore.FieldValue.serverTimestamp(),
                 });
             }

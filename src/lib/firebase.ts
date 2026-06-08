@@ -9,9 +9,9 @@ const firebaseConfig = {
   authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "refund-connect-1m30.firebaseapp.com",
   projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "refund-connect-1m30",
   storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "refund-connect-1m30.firebasestorage.app",
-  messagingSenderId: "540713290869",
-  appId: "1:540713290869:web:9b2358f3ab18da4072fc3c",
-  measurementId: "G-B4TRYC5CQZ"
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "540713290869",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:540713290869:web:9b2358f3ab18da4072fc3c",
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-B4TRYC5CQZ"
 };
 
 let app: FirebaseApp;

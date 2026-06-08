@@ -3,10 +3,9 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { CreditCard, Calendar, Settings } from 'lucide-react';
+import { CreditCard, Calendar } from 'lucide-react';
 import PaymentHistoryView from './PaymentHistoryView';
 import SubscriptionManager from './SubscriptionManager';
-import { useToast } from '@/hooks/use-toast';
 
 
 interface BillingInfo {
@@ -23,7 +22,10 @@ interface BillingInfo {
 }
 
 const BillingManagement: React.FC = () => {
-  const [billingInfo, setBillingInfo] = useState<BillingInfo>({
+  // Display-only snapshot of the current plan. Authoritative subscription state
+  // (plan changes, cancellation, card, invoices) is managed through Stripe in
+  // the "Manage Subscription" tab (SubscriptionManager → Stripe Customer Portal).
+  const [billingInfo] = useState<BillingInfo>({
     currentPlan: 'premium',
     planName: 'Premium',
     amount: 29.95,
@@ -35,82 +37,6 @@ const BillingManagement: React.FC = () => {
     storageUsed: 12.5,
     storageLimit: 50
   });
-  
-  const [loading, setLoading] = useState(false);
-  const [showCancelDialog, setShowCancelDialog] = useState(false);
-  const [showUpgradeDialog, setShowUpgradeDialog] = useState(false);
-  const { toast } = useToast();
-
-  const handleCancelSubscription = async () => {
-    try {
-      setLoading(true);
-      
-      // Call Stripe API to cancel subscription
-      const { error } = await supabase.functions.invoke('cancel-subscription', {
-        body: { subscriptionId: 'sub_example123' }
-      });
-
-      if (error) throw error;
-
-      setBillingInfo(prev => ({ ...prev, status: 'canceled' }));
-      setShowCancelDialog(false);
-      
-      toast({
-        title: 'Subscription Canceled',
-        description: 'Your subscription will remain active until the end of the current billing period.'
-      });
-    } catch (error: any) {
-      toast({
-        title: 'Error',
-        description: error.message || 'Failed to cancel subscription',
-        variant: 'destructive'
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleReactivateSubscription = async () => {
-    try {
-      setLoading(true);
-      
-      const { error } = await supabase.functions.invoke('reactivate-subscription', {
-        body: { subscriptionId: 'sub_example123' }
-      });
-
-      if (error) throw error;
-
-      setBillingInfo(prev => ({ ...prev, status: 'active' }));
-      
-      toast({
-        title: 'Subscription Reactivated',
-        description: 'Your subscription is now active again.'
-      });
-    } catch (error: any) {
-      toast({
-        title: 'Error',
-        description: error.message || 'Failed to reactivate subscription',
-        variant: 'destructive'
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const downloadInvoice = async () => {
-    try {
-      toast({
-        title: 'Invoice Downloaded',
-        description: 'Latest invoice has been downloaded to your device'
-      });
-    } catch (error: any) {
-      toast({
-        title: 'Error',
-        description: 'Failed to download invoice',
-        variant: 'destructive'
-      });
-    }
-  };
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -131,11 +57,6 @@ const BillingManagement: React.FC = () => {
       month: 'long',
       day: 'numeric'
     });
-  };
-
-  const usagePercentage = (used: number, limit: number) => {
-    if (limit === -1) return 0; // Unlimited
-    return Math.min((used / limit) * 100, 100);
   };
 
   return (

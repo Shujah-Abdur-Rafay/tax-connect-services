@@ -203,9 +203,15 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
       }
     }
 
-    // Send verification email for professional accounts
+    // Send verification email for professional accounts. Best-effort — a send
+    // failure (e.g. auth/too-many-requests) must never block registration; the
+    // user can always resend from the member portal's Email Verification card.
     if (role === 'professional') {
-      await sendVerificationEmail(userCredential.user);
+      try {
+        await sendVerificationEmail(userCredential.user);
+      } catch (verifyErr) {
+        console.warn('[register] verification email send failed (non-fatal):', verifyErr);
+      }
     }
   };
 

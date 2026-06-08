@@ -4,7 +4,8 @@ import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Mail, RefreshCw, CheckCircle } from 'lucide-react';
 import { auth } from '@/lib/firebase';
-import { sendEmailVerification, reload } from 'firebase/auth';
+import { reload } from 'firebase/auth';
+import { sendVerificationEmail, verificationErrorMessage } from '@/services/emailVerificationService';
 import { useToast } from '@/hooks/use-toast';
 
 interface EmailVerificationPendingProps {
@@ -64,7 +65,7 @@ export default function EmailVerificationPending({ email, onVerified }: EmailVer
     try {
       const user = auth.currentUser;
       if (user) {
-        await sendEmailVerification(user);
+        await sendVerificationEmail(user);
         toast({
           title: "Verification email sent!",
           description: "Please check your inbox.",
@@ -75,7 +76,7 @@ export default function EmailVerificationPending({ email, onVerified }: EmailVer
     } catch (error: any) {
       toast({
         title: "Failed to send email",
-        description: error.message,
+        description: verificationErrorMessage(error),
         variant: "destructive"
       });
     } finally {

@@ -2,8 +2,16 @@ import React, { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from '@/components/ui/dialog';
 import { FileText, DollarSign, Clock, Shield } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
+import { PaymentForm } from '@/components/PaymentForm';
+import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/hooks/use-toast';
 
 interface DocumentService {
@@ -60,58 +68,28 @@ interface DocumentPricingCardProps {
 }
 
 const DocumentPricingCard: React.FC<DocumentPricingCardProps> = ({ onServiceSelect }) => {
-  const [loading, setLoading] = useState<string | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  // The service whose Stripe payment dialog is currently open (null = closed).
+  const [payingFor, setPayingFor] = useState<DocumentService | null>(null);
+  const { user } = useAuth();
   const { toast } = useToast();
 
-  const handleProcessDocument = async (service: DocumentService) => {
-    try {
-      setLoading(service.id);
-      
-      // Create payment intent for document processing
-      const { data, error } = await supabase.functions.invoke('process-document-payment', {
-        body: {
-          documentType: service.name,
-          processingFee: service.basePrice,
-          userId: 'user_123', // In real app, get from auth context
-          customerEmail: 'user@example.com',
-          description: `${service.name} - ${service.description}`
-        }
-      });
+  // Open the Stripe payment dialog for the chosen document service. The actual
+  // charge is created by the Firebase Cloud Function `createTaxProPayment`
+  // (via <PaymentForm>) and confirmed with Stripe Elements — no Supabase.
+  const handleProcessDocument = (service: DocumentService) => {
+    setPayingFor(service);
+  };
 
-      if (error) {
-        // Fallback to mock processing for demo
-        toast({
-          title: 'Document Processing Started',
-          description: `${service.name} processing has been initiated. You will receive updates via email.`
-        });
-        
-        if (onServiceSelect) {
-          onServiceSelect(service);
-        }
-        return;
-      }
-
-      if (data?.clientSecret) {
-        // In real app, redirect to payment form with client secret
-        toast({
-          title: 'Payment Required',
-          description: 'Redirecting to secure payment form...'
-        });
-      }
-
-      if (onServiceSelect) {
-        onServiceSelect(service);
-      }
-    } catch (error: any) {
-      toast({
-        title: 'Error',
-        description: error.message || 'Failed to process document request',
-        variant: 'destructive'
-      });
-    } finally {
-      setLoading(null);
-    }
+  const handlePaymentSuccess = () => {
+    const service = payingFor;
+    setPayingFor(null);
+    if (!service) return;
+    toast({
+      title: 'Payment received',
+      description: `Your payment for ${service.name} was successful. We'll begin processing and email you updates.`,
+    });
+    onServiceSelect?.(service);
   };
 
   const filteredServices = documentServices.filter(service => 
@@ -187,12 +165,11 @@ const DocumentPricingCard: React.FC<DocumentPricingCardProps> = ({ onServiceSele
                 </ul>
               </div>
 
-              <Button 
-                className="w-full" 
+              <Button
+                className="w-full"
                 onClick={() => handleProcessDocument(service)}
-                disabled={loading === service.id}
               >
-                {loading === service.id ? 'Processing...' : 'Start Processing'}
+                Start Processing
               </Button>
             </CardContent>
           </Card>
@@ -219,6 +196,33 @@ const DocumentPricingCard: React.FC<DocumentPricingCardProps> = ({ onServiceSele
           </div>
         </CardContent>
       </Card>
+
+      {/* Stripe payment dialog — charges the document processing fee via Stripe. */}
+      <Dialog open={!!payingFor} onOpenChange={(open) => !open && setPayingFor(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Pay for {payingFor?.name}</DialogTitle>
+            <DialogDescription>
+              Secure payment processed by Stripe. Your card is charged the
+              one-time processing fee for this service.
+            </DialogDescription>
+          </DialogHeader>
+          {payingFor && (
+            <PaymentForm
+              amount={payingFor.basePrice}
+              description={`${payingFor.name} — ${payingFor.description}`}
+              onSuccess={handlePaymentSuccess}
+              metadata={{
+                purpose: 'document_processing',
+                documentServiceId: payingFor.id,
+                documentType: payingFor.name,
+                ...(user?.uid ? { userId: user.uid } : {}),
+                ...(user?.email ? { customerEmail: user.email } : {}),
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 };

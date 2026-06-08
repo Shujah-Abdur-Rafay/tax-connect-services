@@ -12,13 +12,14 @@ import {
   updateDoc,
   serverTimestamp,
 } from 'firebase/firestore';
-import { createUserWithEmailAndPassword, sendEmailVerification } from 'firebase/auth';
+import { createUserWithEmailAndPassword } from 'firebase/auth';
 import OnboardingProgress from './onboarding/OnboardingProgress';
 import AccountCreationStep from './onboarding/AccountCreationStep';
 import ProfileSetupStep from './onboarding/ProfileSetupStep';
 import ServiceOfferingsStep from './onboarding/ServiceOfferingsStep';
 import ProfilePreviewStep from './onboarding/ProfilePreviewStep';
 import EmailVerificationPending from './EmailVerificationPending';
+import { sendVerificationEmail } from '@/services/emailVerificationService';
 import LoginDialog from './LoginDialog';
 import JotFormQuestionsStep, {
   JotFormAnswers,
@@ -410,7 +411,7 @@ export default function TaxProfessionalOnboarding() {
       const userCredential = await createUserWithEmailAndPassword(auth, account.email, account.password);
 
       try {
-        await sendEmailVerification(userCredential.user);
+        await sendVerificationEmail(userCredential.user);
         toast({ title: 'Account created!', description: 'Please verify your email to continue.' });
         setShowVerificationPending(true);
       } catch {
