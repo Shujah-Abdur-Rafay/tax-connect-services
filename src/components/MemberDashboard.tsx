@@ -28,6 +28,7 @@ import NotificationSettings from '@/components/profile/NotificationSettings';
 import ProfileDiagnostics from '@/components/profile/ProfileDiagnostics';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '@/lib/firebase';
+import { fetchMemberStats, type MemberStats } from '@/services/memberStatsService';
 
 
 
@@ -44,19 +45,11 @@ const MemberDashboard: React.FC = () => {
 
 
   const [isEmailVerified, setIsEmailVerified] = useState(false);
-  
-  const [notifications, setNotifications] = useState([
-    { id: 1, type: 'message', content: 'New message from Sarah Johnson, CPA', time: '2 hours ago', unread: true },
-    { id: 2, type: 'document', content: 'Tax form template updated', time: '1 day ago', unread: true },
-    { id: 3, type: 'system', content: 'Your membership expires in 30 days', time: '2 days ago', unread: false }
-  ]);
 
-  const [recentActivity] = useState([
-    { action: 'Downloaded', item: 'Form 1040 Template', time: '3 hours ago' },
-    { action: 'Connected with', item: 'Michael Chen, EA', time: '1 day ago' },
-    { action: 'Completed', item: 'Tax Law Update Course', time: '2 days ago' },
-    { action: 'Uploaded', item: 'Client Document', time: '3 days ago' }
-  ]);
+  // Live per-user stats (Documents / Connections / Messages / Courses) + the
+  // recent-activity feed, all computed from real Firestore collections.
+  const [stats, setStats] = useState<MemberStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
 
   useEffect(() => {
     if (user) {
@@ -64,8 +57,22 @@ const MemberDashboard: React.FC = () => {
       if (isProfessional) {
         fetchProfessionalId();
       }
+      let active = true;
+      setStatsLoading(true);
+      fetchMemberStats(user.uid)
+        .then((s) => {
+          if (active) setStats(s);
+        })
+        .finally(() => {
+          if (active) setStatsLoading(false);
+        });
+      return () => {
+        active = false;
+      };
     }
   }, [user, isProfessional]);
+
+  const recentActivity = stats?.recentActivity ?? [];
 
   const fetchProfessionalId = async () => {
     if (!user?.uid) return;
@@ -82,12 +89,6 @@ const MemberDashboard: React.FC = () => {
   };
 
 
-
-  const markAsRead = (id: number) => {
-    setNotifications(notifications.map(n => 
-      n.id === id ? { ...n, unread: false } : n
-    ));
-  };
 
   const handleRestrictedAction = () => {
     // This function is called when user tries to access restricted features
@@ -137,11 +138,15 @@ const MemberDashboard: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-gray-600">Documents</p>
-                  <p className="text-2xl font-bold text-gray-900">24</p>
+                  <p className="text-2xl font-bold text-gray-900">
+                    {statsLoading ? '—' : stats?.documents.total ?? 0}
+                  </p>
                 </div>
                 <FileText className="w-8 h-8 text-blue-600" />
               </div>
-              <p className="text-xs text-gray-500 mt-2">+3 this week</p>
+              <p className="text-xs text-gray-500 mt-2">
+                {statsLoading ? ' ' : `+${stats?.documents.deltaWeek ?? 0} this week`}
+              </p>
             </CardContent>
           </Card>
 
@@ -150,11 +155,15 @@ const MemberDashboard: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-gray-600">Connections</p>
-                  <p className="text-2xl font-bold text-gray-900">12</p>
+                  <p className="text-2xl font-bold text-gray-900">
+                    {statsLoading ? '—' : stats?.connections.total ?? 0}
+                  </p>
                 </div>
                 <Users className="w-8 h-8 text-green-600" />
               </div>
-              <p className="text-xs text-gray-500 mt-2">+2 this month</p>
+              <p className="text-xs text-gray-500 mt-2">
+                {statsLoading ? ' ' : `+${stats?.connections.deltaMonth ?? 0} this month`}
+              </p>
             </CardContent>
           </Card>
 
@@ -163,11 +172,15 @@ const MemberDashboard: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-gray-600">Messages</p>
-                  <p className="text-2xl font-bold text-gray-900">8</p>
+                  <p className="text-2xl font-bold text-gray-900">
+                    {statsLoading ? '—' : stats?.messages.total ?? 0}
+                  </p>
                 </div>
                 <MessageSquare className="w-8 h-8 text-purple-600" />
               </div>
-              <p className="text-xs text-gray-500 mt-2">2 unread</p>
+              <p className="text-xs text-gray-500 mt-2">
+                {statsLoading ? ' ' : `${stats?.messages.unread ?? 0} unread`}
+              </p>
             </CardContent>
           </Card>
 
@@ -176,11 +189,15 @@ const MemberDashboard: React.FC = () => {
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm font-medium text-gray-600">Courses</p>
-                  <p className="text-2xl font-bold text-gray-900">6</p>
+                  <p className="text-2xl font-bold text-gray-900">
+                    {statsLoading ? '—' : stats?.courses.total ?? 0}
+                  </p>
                 </div>
                 <BookOpen className="w-8 h-8 text-orange-600" />
               </div>
-              <p className="text-xs text-gray-500 mt-2">1 in progress</p>
+              <p className="text-xs text-gray-500 mt-2">
+                {statsLoading ? ' ' : `${stats?.courses.inProgress ?? 0} in progress`}
+              </p>
             </CardContent>
           </Card>
         </div>
@@ -239,15 +256,24 @@ const MemberDashboard: React.FC = () => {
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-4">
-                    {recentActivity.map((activity, index) => (
-                      <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                        <div>
-                          <p className="text-sm font-medium">{activity.action} {activity.item}</p>
-                          <p className="text-xs text-gray-500">{activity.time}</p>
+                    {statsLoading ? (
+                      <p className="text-sm text-gray-500 py-4 text-center">Loading activity…</p>
+                    ) : recentActivity.length === 0 ? (
+                      <p className="text-sm text-gray-500 py-4 text-center">
+                        No recent activity yet. Uploads, connections, courses and
+                        messages will show up here.
+                      </p>
+                    ) : (
+                      recentActivity.map((activity, index) => (
+                        <div key={index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                          <div>
+                            <p className="text-sm font-medium">{activity.action} {activity.item}</p>
+                            <p className="text-xs text-gray-500">{activity.timeLabel}</p>
+                          </div>
+                          <ChevronRight className="w-4 h-4 text-gray-400" />
                         </div>
-                        <ChevronRight className="w-4 h-4 text-gray-400" />
-                      </div>
-                    ))}
+                      ))
+                    )}
                   </div>
                 </CardContent>
               </Card>

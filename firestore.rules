@@ -93,7 +93,9 @@ service cloud.firestore {
       allow read: if isSignedIn()
         && (resource.data.professional_id == request.auth.uid
             || resource.data.client_id == request.auth.uid
-            || resource.data.user_id == request.auth.uid);
+            || resource.data.user_id == request.auth.uid
+            // Admins read every appointment for the platform analytics dashboard.
+            || isAdmin());
       allow create: if isSignedIn();
       allow update: if isSignedIn()
         && (resource.data.professional_id == request.auth.uid
@@ -435,6 +437,70 @@ service cloud.firestore {
     // to clients.
     match /stripe_webhook_events/{eventId} {
       allow read, write: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // connections/{docId} — professional ↔ member network links.
+    //   requester_uid, recipient_uid, participants: [requester_uid, recipient_uid],
+    //   status: 'pending' | 'accepted' | 'declined', created_at
+    // Either party reads/updates; the requester creates; admin reads all for
+    // the platform analytics dashboard.
+    // ─────────────────────────────────────────────────────────────────────
+    match /connections/{docId} {
+      allow read: if isSignedIn()
+        && (request.auth.uid in resource.data.participants || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.requester_uid == request.auth.uid
+        && request.auth.uid in request.resource.data.participants;
+      allow update, delete: if isSignedIn()
+        && request.auth.uid in resource.data.participants;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // course_enrollments/{docId} — a user's continuing-education enrollments.
+    //   user_id, course_id, course_title, status: 'enrolled'|'in_progress'|'completed',
+    //   progress (0..100), created_at, updated_at
+    // The enrolled user owns their rows; admin reads all for analytics.
+    // ─────────────────────────────────────────────────────────────────────
+    match /course_enrollments/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.user_id == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // payments/{docId} — unified payment-history ledger surfaced on the member
+    // portal Payments tab.
+    //   user_uid, amount, currency, status, paymentType, description,
+    //   stripe_payment_intent_id?, created_at
+    // The paying user reads their own records and may append a record (optimistic
+    // client write — the authoritative copy is created server-side by the Stripe
+    // webhook once Cloud Functions are deployed). Records are immutable. Admins
+    // read all for revenue analytics.
+    // ─────────────────────────────────────────────────────────────────────
+    match /payments/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.user_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.user_uid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // profile_views/{docId} — append-only log of professional profile views,
+    // used for the conversion funnel (views → bookings) on the analytics
+    // dashboard. Anyone (incl. anonymous visitors) may log a view; the viewed
+    // pro reads their own; admins read all.
+    //   pro_id, viewer_uid?, source?, created_at
+    // ─────────────────────────────────────────────────────────────────────
+    match /profile_views/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn()
+        && (resource.data.pro_id == request.auth.uid || isAdmin());
+      allow update, delete: if false;
     }
   }
 }

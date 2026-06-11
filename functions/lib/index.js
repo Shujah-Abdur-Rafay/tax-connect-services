@@ -26,7 +26,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.appointmentReminderCron = exports.createBillingPortalSession = exports.createSubscriptionCheckout = exports.onReviewVoteWrite = exports.onReviewWrite = exports.refundGigOrder = exports.onboardingReminderCron = exports.stripeHealth = exports.stripeConnect = exports.stripeWebhook = exports.verifyPaymentSplit = exports.createTaxProPayment = exports.getPaymentReceipt = exports.onNotificationCreated = exports.processMailQueue = exports.requestEmailVerification = exports.sendEmail = void 0;
+exports.appointmentReminderCron = exports.createBillingPortalSession = exports.createSubscriptionCheckout = exports.onReviewVoteWrite = exports.onReviewWrite = exports.refundGigOrder = exports.onboardingReminderCron = exports.stripeHealth = exports.stripeConnect = exports.stripeWebhook = exports.verifyPaymentSplit = exports.createTaxProPayment = exports.getPaymentReceipt = exports.onUserCreated = exports.onNotificationCreated = exports.processMailQueue = exports.requestEmailVerification = exports.sendEmail = void 0;
 const functions = __importStar(require("firebase-functions"));
 const admin = __importStar(require("firebase-admin"));
 const nodemailer = __importStar(require("nodemailer"));
@@ -79,6 +79,9 @@ const STRIPE_SECRET_CONFIG_KEY = 'stripe.secret';
 const PLATFORM_BRAND = 'Refund Connect';
 const PLATFORM_PRIMARY = '#2563eb';
 const PLATFORM_ACCENT = '#10b981';
+// Where billing/account CTA buttons in transactional emails point.
+const MEMBER_PORTAL_URL = 'https://refund-connect.com/member-portal';
+const PUBLIC_SITE_URL = 'https://refund-connect.com';
 const templates = {
     'new-message': (d) => ({
         subject: `New message from ${d.senderName}`,
@@ -567,6 +570,59 @@ exports.onNotificationCreated = functions.firestore
     catch (err) {
         console.error(`[onNotificationCreated] failed to queue email for ${snap.id}:`, (err === null || err === void 0 ? void 0 : err.message) || err);
         await snap.ref.set({ emailQueued: false, emailSkippedReason: 'queue_failed' }, { merge: true });
+    }
+    return null;
+});
+/**
+ * onUserCreated — welcome email on account creation.
+ *
+ * Fires when the client writes the `users/{uid}` profile doc during
+ * registration (AuthContext.register). Builds a branded, role-tailored welcome
+ * and enqueues it into the `mail` collection, which processMailQueue then
+ * delivers via Resend. This guarantees EVERY new account (client or pro) gets a
+ * welcome email, independent of any client-side send.
+ *
+ * Idempotent via the `welcomeEmailSent` flag stamped back onto the user doc, so
+ * a function retry can never double-send.
+ */
+exports.onUserCreated = functions.firestore
+    .document('users/{uid}')
+    .onCreate(async (snap) => {
+    const u = snap.data() || {};
+    if (u.welcomeEmailSent === true)
+        return null;
+    const email = typeof u.email === 'string' ? u.email.trim() : '';
+    if (!email || !/.+@.+\..+/.test(email)) {
+        await snap.ref.set({ welcomeEmailSent: false, welcomeEmailSkippedReason: 'no_email' }, { merge: true });
+        return null;
+    }
+    const name = (typeof u.name === 'string' && u.name.trim()) || 'there';
+    const role = u.role === 'professional' ? 'professional' : 'client';
+    const subject = `Welcome to ${PLATFORM_BRAND}, ${name}!`;
+    const body = role === 'professional'
+        ? `Hi ${name},\n\nWelcome to ${PLATFORM_BRAND} — we're glad to have you. Your free Directory Listing profile is already live.\n\nTo get the most out of your account:\n• Complete your profile (photo, services, pricing, credentials)\n• Verify your email so clients can reach you\n• Explore your dashboard and connect Stripe payouts\n\nClick below to jump into your member portal.`
+        : `Hi ${name},\n\nWelcome to ${PLATFORM_BRAND}! Your account is ready.\n\nYou can now browse vetted tax professionals, message them directly, and manage everything from one place.\n\nClick below to get started.`;
+    const html = buildNotificationEmailHtml(subject, body, {
+        ctaUrl: role === 'professional' ? MEMBER_PORTAL_URL : PUBLIC_SITE_URL,
+        ctaLabel: role === 'professional' ? 'Go to your dashboard' : 'Find a tax professional',
+    });
+    try {
+        await db.collection('mail').add({
+            to: email,
+            message: { subject, html, text: body },
+            source: 'welcome',
+            userId: snap.id,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+        await snap.ref.set({
+            welcomeEmailSent: true,
+            welcomeEmailSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        }, { merge: true });
+        console.log(`[onUserCreated] queued welcome email to ${email} (${role})`);
+    }
+    catch (err) {
+        console.error(`[onUserCreated] failed to queue welcome email for ${snap.id}:`, (err === null || err === void 0 ? void 0 : err.message) || err);
+        await snap.ref.set({ welcomeEmailSent: false, welcomeEmailSkippedReason: 'queue_failed' }, { merge: true });
     }
     return null;
 });
@@ -1197,6 +1253,57 @@ function professionalRefFromMetadata(metadata) {
         return null;
     return db.collection('professionals').doc(professionalId);
 }
+/** Format a Stripe minor-unit amount (e.g. 29995) as a currency string ("$299.95"). */
+function formatStripeAmount(amount, currency) {
+    const value = (Number(amount) || 0) / 100;
+    try {
+        return value.toLocaleString('en-US', {
+            style: 'currency',
+            currency: (currency || 'usd').toUpperCase(),
+            minimumFractionDigits: 2,
+        });
+    }
+    catch (_a) {
+        return `$${value.toFixed(2)}`;
+    }
+}
+/**
+ * Email + in-app notify the professional behind a Stripe billing event.
+ *
+ * Writes ONE `notifications/{id}` doc — the onNotificationCreated bridge turns
+ * it into a branded email (mail queue → Resend) AND it surfaces in the in-app
+ * notification feed. An explicit recipient email is resolved here (professionals
+ * doc → Auth) and stamped on the doc so the bridge never skips with 'no_email'.
+ *
+ * Best-effort: never throws, so a notify failure can't 500 the webhook (which
+ * would make Stripe retry the whole event).
+ */
+async function notifyProfessionalBilling(professionalId, args) {
+    var _a;
+    try {
+        let email = '';
+        try {
+            const snap = await db.collection('professionals').doc(professionalId).get();
+            email = (snap.exists ? (_a = snap.data()) === null || _a === void 0 ? void 0 : _a.email : '') || '';
+        }
+        catch (_e) {
+            /* fall through to Auth */
+        }
+        if (!email) {
+            try {
+                email = (await admin.auth().getUser(professionalId)).email || '';
+            }
+            catch (_e) {
+                /* leave blank; bridge will attempt its own resolution */
+            }
+        }
+        await db.collection('notifications').add(Object.assign(Object.assign({ userId: professionalId }, (email ? { email } : {})), { type: args.type, title: args.title, message: args.message, read: false, createdAt: admin.firestore.FieldValue.serverTimestamp(), metadata: Object.assign({ source: 'stripe_webhook' }, (args.actionUrl ? { actionUrl: args.actionUrl } : {})) }));
+        console.log(`[stripeWebhook] billing notification queued for professionals/${professionalId} (${args.type})`);
+    }
+    catch (err) {
+        console.error(`[stripeWebhook] notifyProfessionalBilling failed for ${professionalId}:`, (err === null || err === void 0 ? void 0 : err.message) || err);
+    }
+}
 async function handlePaymentIntentSucceeded(pi) {
     var _a;
     const ref = professionalRefFromMetadata(pi.metadata);
@@ -1223,6 +1330,13 @@ async function handlePaymentIntentSucceeded(pi) {
     }
     await ref.set(update, { merge: true });
     console.log(`[stripeWebhook] Updated professionals/${ref.id} -> paid${membershipTier ? ` (tier=${membershipTier})` : ''}`);
+    // Email the client a payment confirmation / receipt.
+    await notifyProfessionalBilling(ref.id, {
+        type: 'payment',
+        title: 'Payment received',
+        message: `We've received your payment of ${formatStripeAmount(pi.amount, pi.currency)}${membershipTier ? ` for your ${membershipTier} membership` : ''}. Your account is active — thank you!`,
+        actionUrl: MEMBER_PORTAL_URL,
+    });
 }
 async function handlePaymentIntentFailed(pi) {
     var _a, _b;
@@ -1243,6 +1357,13 @@ async function handlePaymentIntentFailed(pi) {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
     console.log(`[stripeWebhook] Updated professionals/${ref.id} -> failed (${errorMessage})`);
+    // Email the client that their payment failed and action is needed.
+    await notifyProfessionalBilling(ref.id, {
+        type: 'payment',
+        title: 'Payment failed — action needed',
+        message: `Your recent payment could not be processed (${errorMessage}). Please update your payment method to keep your membership active.`,
+        actionUrl: MEMBER_PORTAL_URL,
+    });
 }
 /**
  * Stripe subscription -> internal membership status mapping.
@@ -1303,6 +1424,17 @@ async function handleSubscriptionUpdated(sub) {
     }
     await ref.set(update, { merge: true });
     console.log(`[stripeWebhook] Updated professionals/${ref.id} -> subscription ${sub.status} (membership=${membershipStatus})`);
+    // Only email on dunning states — emailing every routine renewal "updated"
+    // event would spam the client. Successful charges are covered by
+    // payment_intent.succeeded above.
+    if (sub.status === 'past_due' || sub.status === 'unpaid') {
+        await notifyProfessionalBilling(ref.id, {
+            type: 'subscription',
+            title: 'Your membership payment is past due',
+            message: `We couldn't collect your latest ${membershipTier ? membershipTier + ' ' : ''}membership payment. Please update your billing details soon to avoid losing access.`,
+            actionUrl: MEMBER_PORTAL_URL,
+        });
+    }
 }
 async function handleSubscriptionDeleted(sub) {
     const ref = professionalRefFromMetadata(sub.metadata);
@@ -1321,6 +1453,13 @@ async function handleSubscriptionDeleted(sub) {
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, { merge: true });
     console.log(`[stripeWebhook] Updated professionals/${ref.id} -> subscription canceled (membership=inactive)`);
+    // Email the client a cancellation confirmation.
+    await notifyProfessionalBilling(ref.id, {
+        type: 'subscription',
+        title: 'Your membership has been canceled',
+        message: `Your membership has been canceled and your account has been moved to the free plan. You can re-subscribe anytime from your dashboard.`,
+        actionUrl: MEMBER_PORTAL_URL,
+    });
 }
 /**
  * stripeConnect
@@ -1769,7 +1908,7 @@ exports.stripeHealth = functions.https.onRequest((req, res) => {
 //   5. Records onboarding_reminders/{uid} so the same pro is never reminded twice.
 //
 // Config (optional override of the resume link base):
-//   firebase functions:config:set app.onboarding_url="https://www.refund-connect.com/onboarding"
+//   firebase functions:config:set app.onboarding_url="https://refund-connect.com/onboarding"
 // Email delivery requires RESEND_API_KEY (see getResendSettings / functions/.env).
 // ─────────────────────────────────────────────────────────────────────────────
 const REMINDER_BRAND = 'Refund Connect';
@@ -1870,7 +2009,7 @@ exports.onboardingReminderCron = functions.pubsub
     const now = Date.now();
     const onboardingBaseUrl = ((_a = functions.config().app) === null || _a === void 0 ? void 0 : _a.onboarding_url) ||
         process.env.ONBOARDING_URL ||
-        'https://www.refund-connect.com/onboarding';
+        'https://refund-connect.com/onboarding';
     // Delivery is centralized: we enqueue into the `mail` collection and
     // processMailQueue sends every message via Resend. No direct SMTP here.
     let scanned = 0;

@@ -1,10 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { Search, MessageCircle, Users, Plus, Archive } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
+import { subscribeToUserConversations } from '@/services/messagingService';
+import { relativeTime } from '@/services/memberStatsService';
 
 interface Conversation {
   id: string;
@@ -24,44 +27,38 @@ interface ConversationListProps {
 }
 
 export default function ConversationList({ onSelectConversation, activeConversationId }: ConversationListProps) {
+  const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'direct' | 'group' | 'case'>('all');
+  const [conversations, setConversations] = useState<Conversation[]>([]);
 
-  const mockConversations: Conversation[] = [
-    {
-      id: '1',
-      title: 'Sarah Johnson - Tax Consultation',
-      type: 'direct',
-      participants: ['Sarah Johnson'],
-      lastMessage: 'Thank you for reviewing my documents',
-      lastMessageAt: '2 minutes ago',
-      unreadCount: 2,
-      isActive: true
-    },
-    {
-      id: '2',
-      title: 'Business Tax Case #2024-001',
-      type: 'case',
-      participants: ['Mike Chen', 'Lisa Wong', 'David Smith'],
-      lastMessage: 'Updated the depreciation schedule',
-      lastMessageAt: '15 minutes ago',
-      unreadCount: 0,
-      caseId: '2024-001',
-      isActive: true
-    },
-    {
-      id: '3',
-      title: 'Estate Planning Team',
-      type: 'group',
-      participants: ['Emma Davis', 'Robert Taylor', 'Jennifer Lee'],
-      lastMessage: 'Meeting scheduled for tomorrow',
-      lastMessageAt: '1 hour ago',
-      unreadCount: 1,
-      isActive: true
+  // Live conversations from Firestore for the signed-in user.
+  useEffect(() => {
+    if (!user?.uid) {
+      setConversations([]);
+      return;
     }
-  ];
+    const unsub = subscribeToUserConversations(user.uid, (list) => {
+      setConversations(
+        list.map((c) => {
+          const isPro = c.professionalId === user.uid;
+          return {
+            id: c.id,
+            title: c.subject || (isPro ? c.clientName : c.professionalName) || 'Conversation',
+            type: 'direct' as const,
+            participants: c.participants || [],
+            lastMessage: c.lastMessage || 'No messages yet',
+            lastMessageAt: relativeTime(c.lastMessageAt ? Date.parse(c.lastMessageAt) : null),
+            unreadCount: (c.unreadFor && c.unreadFor[user.uid]) || 0,
+            isActive: true,
+          };
+        }),
+      );
+    });
+    return () => unsub();
+  }, [user?.uid]);
 
-  const filteredConversations = mockConversations.filter(conv => {
+  const filteredConversations = conversations.filter(conv => {
     const matchesSearch = conv.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
                          conv.participants.some(p => p.toLowerCase().includes(searchQuery.toLowerCase()));
     const matchesFilter = filter === 'all' || conv.type === filter;

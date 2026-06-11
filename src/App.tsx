@@ -125,7 +125,7 @@ const App = () => (
               <Route path="/our-story" element={<OurStory />} />
               <Route path="/join-platform" element={<JoinPlatform />} />
               <Route path="/pricing" element={<Pricing />} />
-              <Route path="/join" element={<ExternalRedirect url="https://www.refund-connect.com/join-platform" />} />
+              <Route path="/join" element={<ExternalRedirect url="https://refund-connect.com/join-platform" />} />
               <Route path="/onboarding" element={<TaxProfessionalOnboarding />} />
               <Route path="/admin" element={<AdminPanel />} />
               <Route path="/admin/notifications" element={<AdminNotifications />} />

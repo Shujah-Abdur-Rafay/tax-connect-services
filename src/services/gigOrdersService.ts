@@ -14,6 +14,7 @@ import {
 import { db } from '@/lib/firebase';
 import { fetchPlatformFeePercent } from '@/services/platformSettingsService';
 import { queueFirebaseEmail, buildBrandedEmail } from '@/services/firebaseEmailService';
+import { recordPayment } from '@/services/paymentsService';
 import type { GigTier } from '@/data/taxGigs';
 
 // Firebase Cloud Functions base — all gig payment/refund logic runs here now
@@ -635,6 +636,19 @@ export async function confirmOrderPayment(
     stripe_payment_intent_id: paymentIntentId || data.stripe_payment_intent_id || null,
     paid_at: serverTimestamp(),
     updated_at: serverTimestamp(),
+  });
+
+  // Append to the client's payment history (real `payments` ledger). Best-effort
+  // optimistic copy — the Stripe webhook writes the authoritative record once
+  // Cloud Functions are deployed. recordPayment never throws.
+  await recordPayment({
+    userUid: userUid,
+    amount: Number(data.price || data.tier?.price || 0),
+    currency: 'usd',
+    status: 'succeeded',
+    paymentType: 'service_fee',
+    description: `${data.gig_title || 'Tax service'}${data.tier?.name ? ` — ${data.tier.name}` : ''}`,
+    stripePaymentIntentId: paymentIntentId || data.stripe_payment_intent_id || undefined,
   });
 
   const fresh = await getDoc(ref);

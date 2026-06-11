@@ -50,7 +50,7 @@ const DEFAULT_BODY = `<div style="font-family: Arial, sans-serif; max-width: 600
   <p>Hi there,</p>
   <p>We wanted to share a quick update with you about your enrollment.</p>
   <p>
-    <a href="https://www.refund-connect.com" style="background: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Visit Refund Connect</a>
+    <a href="https://refund-connect.com" style="background: #2563eb; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; display: inline-block;">Visit Refund Connect</a>
   </p>
   <p style="color: #6b7280; font-size: 13px; margin-top: 24px;">
     You're receiving this because you enrolled with Refund Connect.

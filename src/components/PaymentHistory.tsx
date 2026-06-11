@@ -4,7 +4,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Download, Receipt, CreditCard, FileText, Users } from 'lucide-react';
-import { supabase } from '@/lib/supabase';
+import { useAuth } from '@/contexts/AuthContext';
+import { fetchPaymentsForUser } from '@/services/paymentsService';
 import { useToast } from '@/hooks/use-toast';
 
 interface PaymentRecord {
@@ -19,62 +20,36 @@ interface PaymentRecord {
 }
 
 const PaymentHistory: React.FC = () => {
+  const { user } = useAuth();
   const [payments, setPayments] = useState<PaymentRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'subscription' | 'document_processing' | 'service_fee'>('all');
   const { toast } = useToast();
 
   useEffect(() => {
-    fetchPaymentHistory();
-  }, []);
+    if (user?.uid) fetchPaymentHistory();
+    else setLoading(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.uid]);
 
   const fetchPaymentHistory = async () => {
+    if (!user?.uid) return;
+    setLoading(true);
     try {
-      // Mock data for demonstration - in real app, fetch from Supabase
-      const mockPayments: PaymentRecord[] = [
-        {
-          id: '1',
-          amount: 29.95,
-          currency: 'usd',
-          status: 'succeeded',
-          paymentType: 'subscription',
-          description: 'Premium Monthly Subscription',
-          createdAt: '2024-01-15T10:30:00Z',
-          stripePaymentIntentId: 'pi_1234567890'
-        },
-        {
-          id: '2',
-          amount: 5.00,
-          currency: 'usd',
-          status: 'succeeded',
-          paymentType: 'document_processing',
-          description: 'Tax Document Processing - Form 1040',
-          createdAt: '2024-01-10T14:20:00Z',
-          stripePaymentIntentId: 'pi_0987654321'
-        },
-        {
-          id: '3',
-          amount: 150.00,
-          currency: 'usd',
-          status: 'succeeded',
-          paymentType: 'service_fee',
-          description: 'Professional Consultation - 2 hours',
-          createdAt: '2024-01-08T09:15:00Z',
-          stripePaymentIntentId: 'pi_1122334455'
-        },
-        {
-          id: '4',
-          amount: 29.95,
-          currency: 'usd',
-          status: 'succeeded',
-          paymentType: 'subscription',
-          description: 'Premium Monthly Subscription',
-          createdAt: '2023-12-15T10:30:00Z',
-          stripePaymentIntentId: 'pi_5566778899'
-        }
-      ];
-      
-      setPayments(mockPayments);
+      // Real payment history from the Firestore `payments` collection.
+      const records = await fetchPaymentsForUser(user.uid);
+      setPayments(
+        records.map((r) => ({
+          id: r.id,
+          amount: r.amount,
+          currency: r.currency,
+          status: r.status,
+          paymentType: r.paymentType,
+          description: r.description,
+          createdAt: r.created_at || new Date().toISOString(),
+          stripePaymentIntentId: r.stripe_payment_intent_id || undefined,
+        })),
+      );
     } catch (error: any) {
       toast({
         title: 'Error',

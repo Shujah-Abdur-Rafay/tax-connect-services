@@ -8,6 +8,7 @@ interface ConversionMetricsProps {
 }
 
 export function ConversionMetrics({ profileViews, bookings, conversionRate }: ConversionMetricsProps) {
+  const bookingsPct = profileViews > 0 ? Math.min(100, (bookings / profileViews) * 100) : 0;
   return (
     <Card>
       <CardHeader>
@@ -26,7 +27,7 @@ export function ConversionMetrics({ profileViews, bookings, conversionRate }: Co
             <span className="text-sm font-medium">Bookings</span>
             <span className="text-sm text-muted-foreground">{bookings.toLocaleString()}</span>
           </div>
-          <Progress value={(bookings / profileViews) * 100} className="h-2" />
+          <Progress value={bookingsPct} className="h-2" />
         </div>
         <div className="pt-4 border-t">
           <div className="flex justify-between items-center">

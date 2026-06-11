@@ -1,42 +1,89 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { CreditCard, Calendar } from 'lucide-react';
+import { CreditCard, Calendar, Loader2 } from 'lucide-react';
 import PaymentHistoryView from './PaymentHistoryView';
 import SubscriptionManager from './SubscriptionManager';
+import { useAuth } from '@/contexts/AuthContext';
+import { db } from '@/lib/firebase';
+import { doc, getDoc, Timestamp } from 'firebase/firestore';
 
 
 interface BillingInfo {
-  currentPlan: string;
   planName: string;
   amount: number;
   billingCycle: 'monthly' | 'yearly';
-  nextBillingDate: string;
-  status: 'active' | 'canceled' | 'past_due';
-  documentsUsed: number;
-  documentLimit: number;
-  storageUsed: number;
-  storageLimit: number;
+  nextBillingDate: string | null;
+  status: 'active' | 'canceled' | 'past_due' | 'inactive';
 }
 
+const tsToDateString = (v: unknown): string | null => {
+  if (!v) return null;
+  if (v instanceof Timestamp) return v.toDate().toISOString();
+  if (typeof (v as any)?.toDate === 'function') {
+    try {
+      return (v as any).toDate().toISOString();
+    } catch {
+      return null;
+    }
+  }
+  if (typeof v === 'string') return v;
+  return null;
+};
+
+const normalizeStatus = (s: unknown): BillingInfo['status'] => {
+  const v = String(s || '').toLowerCase();
+  if (v === 'active' || v === 'trialing' || v === 'paid') return 'active';
+  if (v === 'past_due' || v === 'unpaid') return 'past_due';
+  if (v === 'canceled' || v === 'cancelled') return 'canceled';
+  return 'inactive';
+};
+
 const BillingManagement: React.FC = () => {
-  // Display-only snapshot of the current plan. Authoritative subscription state
-  // (plan changes, cancellation, card, invoices) is managed through Stripe in
-  // the "Manage Subscription" tab (SubscriptionManager → Stripe Customer Portal).
-  const [billingInfo] = useState<BillingInfo>({
-    currentPlan: 'premium',
-    planName: 'Premium',
-    amount: 29.95,
-    billingCycle: 'monthly',
-    nextBillingDate: '2024-02-15',
-    status: 'active',
-    documentsUsed: 127,
-    documentLimit: 500,
-    storageUsed: 12.5,
-    storageLimit: 50
-  });
+  const { user } = useAuth();
+  // Live snapshot of the current plan, read from the user's membership docs.
+  // Authoritative subscription state (plan changes, cancellation, card,
+  // invoices) is managed through Stripe in the "Manage Subscription" tab.
+  const [billingInfo, setBillingInfo] = useState<BillingInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    if (!user?.uid || !db) {
+      setLoading(false);
+      return;
+    }
+    let active = true;
+    (async () => {
+      try {
+        const [proSnap, userSnap] = await Promise.all([
+          getDoc(doc(db, 'professionals', user.uid)),
+          getDoc(doc(db, 'users', user.uid)),
+        ]);
+        const pro = proSnap.exists() ? (proSnap.data() as any) : {};
+        const usr = userSnap.exists() ? (userSnap.data() as any) : {};
+        const planName =
+          pro.membershipTier || usr.membershipLevel || user.membershipLevel || 'Directory Listing';
+        const amountCents = Number(pro.lastPaymentAmount || 0);
+        const info: BillingInfo = {
+          planName: String(planName),
+          amount: amountCents > 0 ? Math.round(amountCents) / 100 : 0,
+          billingCycle: 'yearly',
+          nextBillingDate: tsToDateString(pro.currentPeriodEnd),
+          status: normalizeStatus(pro.membershipStatus || pro.subscriptionStatus || (pro.paymentStatus === 'paid' ? 'active' : '')),
+        };
+        if (active) setBillingInfo(info);
+      } catch (err) {
+        console.warn('[BillingManagement] failed to load billing info:', err);
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [user?.uid, user?.membershipLevel]);
 
   const getStatusBadge = (status: string) => {
     switch (status) {
@@ -46,6 +93,8 @@ const BillingManagement: React.FC = () => {
         return <Badge variant="destructive">Canceled</Badge>;
       case 'past_due':
         return <Badge className="bg-yellow-100 text-yellow-800">Past Due</Badge>;
+      case 'inactive':
+        return <Badge variant="outline" className="bg-gray-50 text-gray-700">No active plan</Badge>;
       default:
         return <Badge variant="outline">{status}</Badge>;
     }
@@ -77,19 +126,31 @@ const BillingManagement: React.FC = () => {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              <div className="grid md:grid-cols-2 gap-6">
-                <div>
-                  <h3 className="font-semibold text-lg">{billingInfo.planName} Plan</h3>
-                  <p className="text-2xl font-bold text-blue-600">
-                    ${billingInfo.amount}/{billingInfo.billingCycle === 'monthly' ? 'month' : 'year'}
-                  </p>
-                  <div className="flex items-center gap-2 mt-2 text-sm text-gray-600">
-                    <Calendar className="w-4 h-4" />
-                    Next billing: {formatDate(billingInfo.nextBillingDate)}
-                  </div>
-                  {getStatusBadge(billingInfo.status)}
+              {loading ? (
+                <div className="flex items-center gap-2 text-gray-500 py-4">
+                  <Loader2 className="w-4 h-4 animate-spin" /> Loading your plan…
                 </div>
-              </div>
+              ) : !billingInfo ? (
+                <p className="text-gray-500 py-4">No billing information available.</p>
+              ) : (
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div>
+                    <h3 className="font-semibold text-lg">{billingInfo.planName} Plan</h3>
+                    <p className="text-2xl font-bold text-blue-600">
+                      {billingInfo.amount > 0
+                        ? `$${billingInfo.amount}/${billingInfo.billingCycle === 'monthly' ? 'month' : 'year'}`
+                        : 'Free'}
+                    </p>
+                    {billingInfo.nextBillingDate && (
+                      <div className="flex items-center gap-2 mt-2 text-sm text-gray-600">
+                        <Calendar className="w-4 h-4" />
+                        Next billing: {formatDate(billingInfo.nextBillingDate)}
+                      </div>
+                    )}
+                    <div className="mt-2">{getStatusBadge(billingInfo.status)}</div>
+                  </div>
+                </div>
+              )}
             </CardContent>
           </Card>
         </TabsContent>

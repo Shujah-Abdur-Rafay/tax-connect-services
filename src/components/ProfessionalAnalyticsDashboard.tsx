@@ -1,8 +1,17 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { CalendarIcon, DownloadIcon, DollarSignIcon, UsersIcon, StarIcon, TrendingUpIcon } from "lucide-react";
+import {
+  CalendarIcon,
+  DownloadIcon,
+  DollarSignIcon,
+  UsersIcon,
+  StarIcon,
+  TrendingUpIcon,
+  Loader2,
+  RefreshCw,
+} from "lucide-react";
 import { format } from "date-fns";
 import { MetricCard } from "@/components/analytics/MetricCard";
 import { RevenueChart } from "@/components/analytics/RevenueChart";
@@ -10,8 +19,27 @@ import { BookingsChart } from "@/components/analytics/BookingsChart";
 import { ServicesChart } from "@/components/analytics/ServicesChart";
 import { RatingsChart } from "@/components/analytics/RatingsChart";
 import { ConversionMetrics } from "@/components/analytics/ConversionMetrics";
-import { supabase } from "@/lib/supabase";
+import {
+  fetchPlatformAnalytics,
+  type AnalyticsResult,
+} from "@/services/platformAnalyticsService";
 import { useAuth } from "@/contexts/AuthContext";
+
+const EMPTY: AnalyticsResult = {
+  metrics: {
+    totalBookings: 0,
+    totalRevenue: 0,
+    avgRating: 0,
+    retentionRate: 0,
+    profileViews: 0,
+    conversionRate: 0,
+  },
+  deltas: {},
+  revenueData: [],
+  bookingsData: [],
+  servicesData: [],
+  ratingsData: [],
+};
 
 export function ProfessionalAnalyticsDashboard() {
   const { user } = useAuth();
@@ -19,89 +47,67 @@ export function ProfessionalAnalyticsDashboard() {
     from: new Date(new Date().setMonth(new Date().getMonth() - 1)),
     to: new Date(),
   });
-  const [metrics, setMetrics] = useState({
-    totalBookings: 0,
-    totalRevenue: 0,
-    avgRating: 0,
-    retentionRate: 0,
-    profileViews: 0,
-    conversionRate: 0,
-  });
+  const [data, setData] = useState<AnalyticsResult>(EMPTY);
+  const [loading, setLoading] = useState(true);
 
-  const [revenueData, setRevenueData] = useState([]);
-  const [bookingsData, setBookingsData] = useState([]);
-  const [servicesData, setServicesData] = useState([]);
-  const [ratingsData, setRatingsData] = useState([]);
+  const { metrics, deltas, revenueData, bookingsData, servicesData, ratingsData } = data;
+
+  const fetchAnalytics = useCallback(async () => {
+    setLoading(true);
+    try {
+      const result = await fetchPlatformAnalytics(dateRange);
+      setData(result);
+    } catch (err) {
+      console.error("[analytics] failed to load platform analytics:", err);
+      setData(EMPTY);
+    } finally {
+      setLoading(false);
+    }
+  }, [dateRange]);
 
   useEffect(() => {
-    if (user) {
-      fetchAnalytics();
-    }
-  }, [user, dateRange]);
+    if (user) fetchAnalytics();
+  }, [user, fetchAnalytics]);
 
-  const fetchAnalytics = async () => {
-    // Fetch mock data - in production, this would query Supabase
-    setMetrics({
-      totalBookings: 127,
-      totalRevenue: 45680,
-      avgRating: 4.8,
-      retentionRate: 78,
-      profileViews: 1543,
-      conversionRate: 8.2,
-    });
-
-    setRevenueData([
-      { date: "Jan", revenue: 3200 },
-      { date: "Feb", revenue: 3800 },
-      { date: "Mar", revenue: 4200 },
-      { date: "Apr", revenue: 3900 },
-      { date: "May", revenue: 4500 },
-      { date: "Jun", revenue: 5100 },
-    ]);
-
-    setBookingsData([
-      { time: "Mon", bookings: 18 },
-      { time: "Tue", bookings: 22 },
-      { time: "Wed", bookings: 25 },
-      { time: "Thu", bookings: 20 },
-      { time: "Fri", bookings: 28 },
-      { time: "Sat", bookings: 8 },
-      { time: "Sun", bookings: 6 },
-    ]);
-
-    setServicesData([
-      { name: "Tax Prep", value: 45 },
-      { name: "Consulting", value: 30 },
-      { name: "Bookkeeping", value: 15 },
-      { name: "Audit Support", value: 10 },
-    ]);
-
-    setRatingsData([
-      { month: "Jan", rating: 4.6 },
-      { month: "Feb", rating: 4.7 },
-      { month: "Mar", rating: 4.8 },
-      { month: "Apr", rating: 4.7 },
-      { month: "May", rating: 4.9 },
-      { month: "Jun", rating: 4.8 },
-    ]);
-  };
-
-  const exportReport = (format: 'csv' | 'pdf') => {
-    if (format === 'csv') {
-      const csvContent = `Metric,Value\nTotal Bookings,${metrics.totalBookings}\nTotal Revenue,$${metrics.totalRevenue}\nAverage Rating,${metrics.avgRating}\nRetention Rate,${metrics.retentionRate}%\n`;
-      const blob = new Blob([csvContent], { type: 'text/csv' });
+  const exportReport = (fmt: "csv" | "pdf") => {
+    if (fmt === "csv") {
+      const csvContent =
+        `Metric,Value\n` +
+        `Total Bookings,${metrics.totalBookings}\n` +
+        `Total Revenue,$${metrics.totalRevenue}\n` +
+        `Average Rating,${metrics.avgRating}\n` +
+        `Client Retention,${metrics.retentionRate}%\n` +
+        `Profile Views,${metrics.profileViews}\n` +
+        `Conversion Rate,${metrics.conversionRate}%\n`;
+      const blob = new Blob([csvContent], { type: "text/csv" });
       const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
+      const a = document.createElement("a");
       a.href = url;
-      a.download = `analytics-${format(new Date(), 'yyyy-MM-dd')}.csv`;
+      a.download = `analytics-${format(new Date(), "yyyy-MM-dd")}.csv`;
       a.click();
+      window.URL.revokeObjectURL(url);
     }
   };
+
+  const hasNoData =
+    !loading &&
+    metrics.totalBookings === 0 &&
+    metrics.totalRevenue === 0 &&
+    metrics.avgRating === 0 &&
+    metrics.profileViews === 0;
 
   return (
     <div className="space-y-6 p-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold">Analytics Dashboard</h1>
+        <div>
+          <h1 className="text-3xl font-bold">Analytics Dashboard</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Live platform-wide metrics from Firestore
+            {loading && (
+              <Loader2 className="inline h-3 w-3 ml-2 animate-spin align-middle" />
+            )}
+          </p>
+        </div>
         <div className="flex gap-2">
           <Popover>
             <PopoverTrigger asChild>
@@ -111,40 +117,60 @@ export function ProfessionalAnalyticsDashboard() {
               </Button>
             </PopoverTrigger>
             <PopoverContent className="w-auto p-0" align="end">
-              <Calendar mode="range" />
+              <Calendar
+                mode="range"
+                selected={{ from: dateRange.from, to: dateRange.to }}
+                onSelect={(range) => {
+                  if (range?.from && range?.to) {
+                    setDateRange({ from: range.from, to: range.to });
+                  }
+                }}
+              />
             </PopoverContent>
           </Popover>
-          <Button onClick={() => exportReport('csv')}>
+          <Button variant="outline" onClick={fetchAnalytics} disabled={loading}>
+            <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+            Refresh
+          </Button>
+          <Button onClick={() => exportReport("csv")}>
             <DownloadIcon className="mr-2 h-4 w-4" />
             Export CSV
           </Button>
         </div>
       </div>
 
+      {hasNoData && (
+        <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 p-6 text-center text-sm text-gray-600">
+          No platform activity in this date range yet. These numbers are computed
+          live from real orders, appointments, reviews, payments and profile
+          views in Firestore — they will populate as the platform is used.
+        </div>
+      )}
+
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <MetricCard
           title="Total Bookings"
           value={metrics.totalBookings}
-          change={12.5}
+          change={deltas.bookings}
           icon={<UsersIcon className="h-4 w-4" />}
         />
         <MetricCard
           title="Total Revenue"
           value={`$${metrics.totalRevenue.toLocaleString()}`}
-          change={8.3}
+          change={deltas.revenue}
           icon={<DollarSignIcon className="h-4 w-4" />}
         />
         <MetricCard
           title="Average Rating"
           value={metrics.avgRating}
-          change={2.1}
+          change={deltas.rating}
           icon={<StarIcon className="h-4 w-4" />}
         />
         <MetricCard
           title="Client Retention"
           value={`${metrics.retentionRate}%`}
-          change={5.2}
           icon={<TrendingUpIcon className="h-4 w-4" />}
+          description="Paying clients with repeat orders"
         />
       </div>
 

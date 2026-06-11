@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://www.refund-connect.com/sitemap.xml
+Sitemap: https://refund-connect.com/sitemap.xml
