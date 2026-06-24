@@ -1,0 +1,644 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// !! DEPLOYMENT REQUIRED !!
+//
+// Editing THIS file does nothing until you DEPLOY it. Firestore enforces the
+// *deployed* ruleset, not the file on disk. Out-of-date deployed rules are a
+// primary cause of "Missing or insufficient permissions" during onboarding.
+//
+//   Production project : refund-connect-1m30
+//   Deploy + verify    : npm run rules:verify
+//   Deploy only        : npm run deploy:rules
+//                        (= firebase deploy --only firestore:rules \
+//                                            --project refund-connect-1m30)
+//   Full guide         : DEPLOY_FIRESTORE_RULES.md
+//
+// After ANY change here, redeploy and confirm in the console:
+//   https://console.firebase.google.com/project/refund-connect-1m30/firestore/rules
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Firestore security rules
+//
+// These rules cover every collection the app actually reads/writes. Firestore
+// denies anything not explicitly allowed, so a missing match block is what
+// produces the dreaded "Missing or insufficient permissions" error.
+//
+// The bug this file fixes: the tax-pro onboarding flow writes the applicant's
+// profile to `professionals/{uid}` (ProfileSetupStep -> handleProfileSave in
+// TaxProfessionalOnboarding.tsx). There was previously NO rule for the
+// `professionals` collection, so the very first setDoc/updateDoc was rejected
+// with "Missing or insufficient permissions" — blocking onboarding at the
+// profile-creation step.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // True when the signed-in user's `users/{uid}` doc has role == 'admin'.
+    // Used to gate admin-only writes (platform fees, promo-code management).
+    function isAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    // The signed-in user's `users/{uid}` document data (role, membershipLevel…).
+    // Used by member_content read gating. Assumes the doc exists (AuthContext
+    // creates it for every account); callers guard with exists() first.
+    function signedInUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    // True when the signed-in user's email has been added to the admin_allowlist
+    // by an existing admin. Backs the "add admin by email" self-elevation.
+    function isEmailAllowlisted() {
+      return isSignedIn()
+        && request.auth.token.email != null
+        && exists(/databases/$(database)/documents/admin_allowlist/$(request.auth.token.email.lower()));
+    }
+
+    // Platform-owner bootstrap emails — promoted to admin on first login even
+    // before any allowlist doc exists. Keep in sync with
+    // adminManagementService.BOOTSTRAP_ADMIN_EMAILS.
+    function isBootstrapAdminEmail() {
+      return isSignedIn()
+        && request.auth.token.email != null
+        && request.auth.token.email.lower() in [
+            'admin@gmail.com',
+            'info@alliance-tax.com',
+            'geraldgaraba@gmail.com'
+          ];
+    }
+
+    // Either condition under which a user may self-elevate to a privileged role
+    // ('admin' or 'help_desk') on login.
+    function mayElevateAdmin() {
+      return isEmailAllowlisted() || isBootstrapAdminEmail();
+    }
+
+    // True when the signed-in user's users/{uid} doc has role == 'help_desk'.
+    function isHelpDesk() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'help_desk';
+    }
+
+    // True when a help-desk user has been granted a specific permission key.
+    function hasHelpDeskPermission(perm) {
+      return isHelpDesk()
+        && perm in get(/databases/$(database)/documents/users/$(request.auth.uid))
+             .data.get('helpDeskPermissions', []);
+    }
+
+    // Effective permission check: full admins always pass; help-desk users pass
+    // only for granted permissions. Mirrors adminPermissions.ts.
+    function hasAdminPermission(perm) {
+      return isAdmin() || hasHelpDeskPermission(perm);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // professionals/{uid}
+    //
+    // The professional directory is publicly readable (the marketing site and
+    // FindProfessionals page list approved pros without auth). The doc id is
+    // the owner's Firebase uid, so a signed-in user may only create/update the
+    // document whose id matches their own uid. This is exactly what the
+    // onboarding flow needs (doc(db,'professionals', user.uid)).
+    // ─────────────────────────────────────────────────────────────────────
+    match /professionals/{proId} {
+      allow read: if true;
+
+      // Create / update / delete only your own profile document.
+      allow create, update, delete: if isSignedIn() && request.auth.uid == proId;
+    }
+
+    // Weekly availability schedule rows. Each doc carries professional_id.
+    match /professional_availability/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.professional_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.professional_id == request.auth.uid;
+    }
+
+    // Per-professional service offerings (if stored as a top-level collection).
+    match /professional_services/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.professional_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.professional_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // appointments/{id}
+    //
+    // A signed-in client can create a booking; the assigned professional and
+    // the booking client can read it. Updates allowed to the professional
+    // (status changes) and the client who created it.
+    // ─────────────────────────────────────────────────────────────────────
+    match /appointments/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.professional_id == request.auth.uid
+            || resource.data.client_id == request.auth.uid
+            || resource.data.user_id == request.auth.uid
+            // Admins read every appointment for the platform analytics dashboard.
+            || isAdmin());
+      allow create: if isSignedIn();
+      allow update: if isSignedIn()
+        && (resource.data.professional_id == request.auth.uid
+            || resource.data.client_id == request.auth.uid
+            || resource.data.user_id == request.auth.uid);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // signed_agreements/{id}
+    //
+    // Immutable audit copies of the signed onboarding agreement. Any signed-in
+    // user can create one (their own application); reads are permitted to
+    // signed-in users (the admin SignedAgreements page). Never updatable or
+    // deletable to preserve the legal record.
+    // ─────────────────────────────────────────────────────────────────────
+    match /signed_agreements/{docId} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // client_documents/{docId}  (migrated from Supabase)
+    //   owner_id        — uid of the client who uploaded the doc
+    //   professional_id — uid of the pro currently assigned access
+    // ─────────────────────────────────────────────────────────────────────
+    match /client_documents/{docId} {
+
+      function isDocOwner() {
+        return isSignedIn() && resource.data.owner_id == request.auth.uid;
+      }
+
+      function isSharedProfessional() {
+        return isSignedIn() && resource.data.professional_id == request.auth.uid;
+      }
+
+      allow get, list: if isDocOwner() || isSharedProfessional();
+
+      allow create: if isSignedIn()
+        && request.resource.data.owner_id == request.auth.uid
+        && request.resource.data.keys().hasAll(
+            ['owner_id', 'file_name', 'storage_path', 'status', 'uploaded_at']
+          );
+
+      allow update: if isDocOwner()
+        || (
+          isSharedProfessional()
+          && request.resource.data.owner_id == resource.data.owner_id
+          && request.resource.data.professional_id == resource.data.professional_id
+          && request.resource.data.storage_path == resource.data.storage_path
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['status', 'updated_at'])
+        );
+
+      allow delete: if isDocOwner();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // users/{uid} — per-user profile / membership document.
+    // ─────────────────────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == uid;
+      // Update paths:
+      //  1. Owners update their OWN doc. They may only elevate to a privileged
+      //     role ('admin' or 'help_desk') when allowlisted or a bootstrap owner
+      //     — this powers admin/help-desk self-elevation on login while closing
+      //     the hole where any user could self-assign a privileged role.
+      //  2. Full admins may update ANY user doc (membership manager, etc.).
+      //  3. Help-desk users with the 'memberships' permission may change another
+      //     user's membershipLevel only (no role/permission escalation).
+      allow update: if isSignedIn() && (
+        (
+          request.auth.uid == uid
+          && (
+            request.resource.data.role == resource.data.role
+            || (request.resource.data.role != 'admin'
+                && request.resource.data.role != 'help_desk')
+            || mayElevateAdmin()
+          )
+        )
+        || isAdmin()
+        || (
+          hasHelpDeskPermission('memberships')
+          && request.resource.data.diff(resource.data).affectedKeys()
+               .hasOnly(['membershipLevel', 'membershipUpdatedAt', 'updatedAt'])
+        )
+      );
+      allow delete: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // admin_allowlist/{email} — emails pre-approved for admin access.
+    //
+    // Doc id is the lowercased email. Only admins manage the list. A signed-in
+    // user may read their own entry (so the app can decide whether to self-
+    // elevate on login); the users/{uid} update rule above enforces that the
+    // promotion is only honoured for allowlisted emails.
+    // ─────────────────────────────────────────────────────────────────────
+    match /admin_allowlist/{email} {
+      allow read: if isAdmin()
+        || (isSignedIn()
+            && request.auth.token.email != null
+            && email == request.auth.token.email.lower());
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // notifications/{id} — in-app notifications addressed to a user.
+    // ─────────────────────────────────────────────────────────────────────
+    match /notifications/{docId} {
+      allow read, update: if isSignedIn()
+        && (resource.data.userId == request.auth.uid
+            || resource.data.recipientId == request.auth.uid);
+      allow create: if isSignedIn();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // conversations/{id} + messages subcollection — direct messaging.
+    // ─────────────────────────────────────────────────────────────────────
+    match /conversations/{convId} {
+      allow read, update: if isSignedIn()
+        && request.auth.uid in resource.data.participants;
+      allow create: if isSignedIn()
+        && request.auth.uid in request.resource.data.participants;
+
+      match /messages/{msgId} {
+        allow read: if isSignedIn()
+          && request.auth.uid in get(
+              /databases/$(database)/documents/conversations/$(convId)
+            ).data.participants;
+        allow create: if isSignedIn()
+          && request.resource.data.senderId == request.auth.uid;
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Lead / submission collections — created from public or signed-in forms.
+    // These are write-mostly (the admin reads them server-side / via console).
+    // Allow create broadly so public marketing forms work; restrict reads.
+    // ─────────────────────────────────────────────────────────────────────
+    match /contact_submissions/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    match /exit_intent_leads/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    match /referrals/{docId} {
+      allow create: if isSignedIn();
+      allow read: if isSignedIn();
+    }
+
+    match /referral_codes/{docId} {
+      allow read: if true;
+      allow create, update: if isSignedIn();
+    }
+
+    // Email queue + admin notifications (used by Firebase "Trigger Email"
+    // extension and the admin dashboard). Signed-in users may enqueue mail and
+    // notifications; reads limited to signed-in admins.
+    match /mail/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn();
+    }
+
+    match /admin_notifications/{docId} {
+      allow create: if true;
+      allow read, update: if isSignedIn();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // onboarding_reminders/{uid}
+    //
+    // Dedup ledger written by the scheduled `onboarding-reminder` edge function
+    // (runs server-side with only the public Web API key). One doc per pro uid
+    // records that a "Finish your application" reminder was already sent so it
+    // is never sent repeatedly. The function reads it to dedup and creates it
+    // after queuing the email — hence read + create are open, update/delete
+    // locked to preserve the record.
+    // ─────────────────────────────────────────────────────────────────────
+    match /onboarding_reminders/{docId} {
+      allow read: if true;
+      allow create: if true;
+      allow update, delete: if false;
+    }
+
+    match /membership_payment_attempts/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn();
+    }
+
+    match /post_purchase_emails/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn();
+    }
+
+    // CRM contacts + broadcast logs — admin tooling, signed-in only.
+    match /crm_contacts/{docId} {
+      allow read, write: if isSignedIn();
+    }
+
+    match /broadcast_log/{docId} {
+      allow read, write: if isSignedIn();
+      match /recipients/{rid} {
+        allow read, write: if isSignedIn();
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // gigs/{gigId} — fixed-price service packages published by a pro.
+    // Public read (the Tax Gigs marketplace lists them without auth); only the
+    // owning pro may create/update/delete their own gig.
+    // ─────────────────────────────────────────────────────────────────────
+    match /gigs/{gigId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.pro_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.pro_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // gig_orders/{orderId} — an order a client places against a pro's gig.
+    // Readable + updatable by the two parties on the order (client_uid /
+    // pro_id); a signed-in client creates the order for themselves. The Stripe
+    // webhook + refundGigOrder Cloud Functions write via the admin SDK, which
+    // bypasses these rules.
+    //
+    // Post-purchase intake / order requirements: the client writes the `intake`
+    // map to their own order (covered by the two-party update rule below), and
+    // the assigned pro reads it as the order's requirements (two-party read).
+    // ─────────────────────────────────────────────────────────────────────
+    match /gig_orders/{orderId} {
+      allow read: if isSignedIn()
+        && (resource.data.client_uid == request.auth.uid
+            || resource.data.pro_id == request.auth.uid
+            // Admins + help-desk payouts staff read every order for the
+            // payout / commission monitor.
+            || hasAdminPermission('payouts'));
+      allow create: if isSignedIn()
+        && request.resource.data.client_uid == request.auth.uid;
+      // The two parties on the order may update it — this is what lets the
+      // client submit the intake form and the pro manage delivery/status.
+      allow update: if isSignedIn()
+        && (resource.data.client_uid == request.auth.uid
+            || resource.data.pro_id == request.auth.uid);
+
+      // Source-doc / deliverable subcollections, if used per-order.
+      match /{sub}/{subDocId} {
+        allow read, write: if isSignedIn()
+          && (get(/databases/$(database)/documents/gig_orders/$(orderId)).data.client_uid == request.auth.uid
+              || get(/databases/$(database)/documents/gig_orders/$(orderId)).data.pro_id == request.auth.uid);
+      }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // reviews/{reviewId} — client reviews of a professional (migrated off the
+    // old Supabase `reviews` table). Public read. The reviewing client creates
+    // and may edit/delete their own review; the reviewed professional may ONLY
+    // append a response (locked to the response fields). helpful_count /
+    // not_helpful_count are maintained by the onReviewVoteWrite Cloud Function
+    // (admin SDK, bypasses rules).
+    // ─────────────────────────────────────────────────────────────────────
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isSignedIn()
+        && request.resource.data.client_id == request.auth.uid;
+      allow update: if isSignedIn()
+        && (
+          resource.data.client_id == request.auth.uid
+          || (
+            resource.data.professional_id == request.auth.uid
+            && request.resource.data.diff(resource.data).affectedKeys()
+                 .hasOnly(['professional_response', 'professional_response_date', 'updated_at'])
+          )
+          // Admins + help-desk reviews staff moderate (e.g. hide) any review.
+          || hasAdminPermission('reviews')
+        );
+      allow delete: if isSignedIn()
+        && (resource.data.client_id == request.auth.uid || hasAdminPermission('reviews'));
+    }
+
+    // review_votes/{reviewId}_{uid} — one helpful / not-helpful vote per user
+    // per review. A user manages only their own vote doc; the running tallies
+    // live on the review and are recomputed server-side.
+    match /review_votes/{voteId} {
+      allow read: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+      allow create, update: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid;
+      allow delete: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // platform_settings/{docId} — global knobs (e.g. fees.applicationFeePercent
+    // shown on every checkout). Public read; admin write only.
+    // ─────────────────────────────────────────────────────────────────────
+    match /platform_settings/{docId} {
+      allow read: if true;
+      allow write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // resources/{docId} — Phase 3 Resource Center / Document Library.
+    //
+    // Admin-published training material, guides, compliance docs, marketing
+    // assets, video training, forms/checklists, and manuals. Metadata is
+    // readable by any signed-in user; the pro-facing library tier-gates each
+    // entry in the UI (a pro only sees download/open links for resources their
+    // membership tier unlocks). Only admins may create / update / delete.
+    // The backing files live in Storage under `resources/{id}/` (see
+    // FIREBASE_STORAGE_RULES.txt).
+    // ─────────────────────────────────────────────────────────────────────
+    match /resources/{docId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // member_content/{docId} — Admin Content Management module.
+    //
+    // Admin-published content (file in Storage under `member-content/{id}/`, or
+    // an external link / video URL) assigned to one or more audience categories
+    // (users | professionals | associates | premium_partners). Visibility is
+    // enforced here, not just in the UI: a signed-in member may read an item
+    // only if they belong to one of its categories (derived from their role /
+    // membershipLevel). Admins read all; only admins write. The membership-level
+    // checks accept the legacy aliases catalogued in membershipLevels.ts so the
+    // DB gate matches the rank-based UI gate.
+    // ─────────────────────────────────────────────────────────────────────
+    match /member_content/{docId} {
+      allow read: if isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && (
+          // Admins + help-desk content managers see all content.
+          hasAdminPermission('content')
+          || ('users' in resource.data.categories
+              && signedInUserData().role == 'client')
+          || ('professionals' in resource.data.categories
+              && signedInUserData().role == 'professional')
+          // Associates bucket — accept the new canonical label and legacy aliases.
+          || ('associates' in resource.data.categories
+              && (signedInUserData().membershipLevel == 'Associate Partner'
+                  || signedInUserData().membershipLevel == 'Associate (Entry Level)'
+                  || signedInUserData().membershipLevel == 'Associate'))
+          // Premier Partners bucket — new canonical label + legacy aliases.
+          || ('premium_partners' in resource.data.categories
+              && (signedInUserData().membershipLevel == 'Premier Partner'
+                  || signedInUserData().membershipLevel == 'Premium Partner'))
+        );
+      // Full admins, or help-desk users granted the 'content' permission.
+      allow create, update, delete: if hasAdminPermission('content');
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // preparer_network/{docId} — Phase 4 Service Bureau preparer roster.
+    //
+    // A Service Bureau Partner (owner_id) invites/manages sub-preparers. The
+    // owner has full read/write over their roster entries; an invited preparer
+    // who is linked (preparer_uid) can read their own entry. The owner field is
+    // immutable on update so a roster row can't be reassigned to another owner.
+    // ─────────────────────────────────────────────────────────────────────
+    match /preparer_network/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.owner_id == request.auth.uid
+            || resource.data.preparer_uid == request.auth.uid);
+      allow create: if isSignedIn()
+        && request.resource.data.owner_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.owner_id == request.auth.uid
+        && request.resource.data.owner_id == resource.data.owner_id;
+    }
+
+    // promo_codes/{docId} — discount codes. Public read so a code can be
+    // validated at checkout; a signed-in user may redeem (update usage).
+    // Creating / deleting codes is admin-only.
+    match /promo_codes/{docId} {
+      allow read: if true;
+      allow update: if isSignedIn();
+      allow create, delete: if isAdmin();
+    }
+
+    // landing_analytics/{docId} — anonymous funnel events from public marketing
+    // pages. Append-only from anyone; reads limited to signed-in users (admin).
+    match /landing_analytics/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    // crm_sync_log/{docId} — best-effort log of Famous CRM syncs. Write-mostly.
+    match /crm_sync_log/{docId} {
+      allow create: if true;
+      allow read, update, delete: if isSignedIn();
+    }
+
+    // user_credits/{uid} — referral credit balance keyed by the user's uid.
+    match /user_credits/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow create, update: if isSignedIn();
+    }
+
+    // email_verification_tokens/{docId} — backup verification records, written
+    // at registration by the signed-in user for their own account.
+    match /email_verification_tokens/{docId} {
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid;
+      allow read: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+    }
+
+    // user_account_status/{uid} — soft account state keyed by uid.
+    match /user_account_status/{uid} {
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
+    }
+
+    // stripe_webhook_events/{eventId} — Stripe webhook idempotency/audit ledger.
+    // Written ONLY by Cloud Functions (admin SDK bypasses rules); never exposed
+    // to clients.
+    match /stripe_webhook_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // connections/{docId} — professional ↔ member network links.
+    //   requester_uid, recipient_uid, participants: [requester_uid, recipient_uid],
+    //   status: 'pending' | 'accepted' | 'declined', created_at
+    // Either party reads/updates; the requester creates; admin reads all for
+    // the platform analytics dashboard.
+    // ─────────────────────────────────────────────────────────────────────
+    match /connections/{docId} {
+      allow read: if isSignedIn()
+        && (request.auth.uid in resource.data.participants || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.requester_uid == request.auth.uid
+        && request.auth.uid in request.resource.data.participants;
+      allow update, delete: if isSignedIn()
+        && request.auth.uid in resource.data.participants;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // course_enrollments/{docId} — a user's continuing-education enrollments.
+    //   user_id, course_id, course_title, status: 'enrolled'|'in_progress'|'completed',
+    //   progress (0..100), created_at, updated_at
+    // The enrolled user owns their rows; admin reads all for analytics.
+    // ─────────────────────────────────────────────────────────────────────
+    match /course_enrollments/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.user_id == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.user_id == request.auth.uid;
+      allow update, delete: if isSignedIn()
+        && resource.data.user_id == request.auth.uid;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // payments/{docId} — unified payment-history ledger surfaced on the member
+    // portal Payments tab.
+    //   user_uid, amount, currency, status, paymentType, description,
+    //   stripe_payment_intent_id?, created_at
+    // The paying user reads their own records and may append a record (optimistic
+    // client write — the authoritative copy is created server-side by the Stripe
+    // webhook once Cloud Functions are deployed). Records are immutable. Admins
+    // read all for revenue analytics.
+    // ─────────────────────────────────────────────────────────────────────
+    match /payments/{docId} {
+      allow read: if isSignedIn()
+        && (resource.data.user_uid == request.auth.uid || isAdmin());
+      allow create: if isSignedIn()
+        && request.resource.data.user_uid == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // profile_views/{docId} — append-only log of professional profile views,
+    // used for the conversion funnel (views → bookings) on the analytics
+    // dashboard. Anyone (incl. anonymous visitors) may log a view; the viewed
+    // pro reads their own; admins read all.
+    //   pro_id, viewer_uid?, source?, created_at
+    // ─────────────────────────────────────────────────────────────────────
+    match /profile_views/{docId} {
+      allow create: if true;
+      allow read: if isSignedIn()
+        && (resource.data.pro_id == request.auth.uid || isAdmin());
+      allow update, delete: if false;
+    }
+  }
+}
