@@ -23,7 +23,8 @@ import {
 } from 'firebase/firestore';
 import DigitalSignature from './DigitalSignature';
 import CollaborativeEditor from './CollaborativeEditor';
-import { ApprovalWorkflow } from './ApprovalWorkflow';
+import DocumentWorkflow from './DocumentWorkflow';
+import DocumentSharingManager from './DocumentSharingManager';
 
 interface Document {
   id: string;
@@ -48,6 +49,7 @@ export default function DocumentManager({ conversationId, currentUser }: Documen
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchTerm, setSearchTerm] = useState('');
   const [uploading, setUploading] = useState(false);
+  const [sharingDoc, setSharingDoc] = useState<Document | null>(null);
 
   const categories = [
     'Tax Returns', 'W-2 Forms', 'Business Records', 'Receipts', 
@@ -286,11 +288,11 @@ export default function DocumentManager({ conversationId, currentUser }: Documen
                       <DialogHeader>
                         <DialogTitle>Approval Workflow</DialogTitle>
                       </DialogHeader>
-                      <ApprovalWorkflow
+                      <DocumentWorkflow
                         documentId={doc.id}
                         documentName={doc.name}
                         currentUser={currentUser}
-                        onApprovalComplete={() => console.log('Workflow completed')}
+                        onApprovalComplete={loadDocuments}
                       />
                     </DialogContent>
                   </Dialog>
@@ -314,7 +316,7 @@ export default function DocumentManager({ conversationId, currentUser }: Documen
                     </DialogContent>
                   </Dialog>
                   
-                  <Button variant="outline" size="sm">
+                  <Button variant="outline" size="sm" onClick={() => setSharingDoc(doc)}>
                     <Users className="h-4 w-4 mr-1" />
                     Share
                   </Button>
@@ -372,6 +374,17 @@ export default function DocumentManager({ conversationId, currentUser }: Documen
           ))}
         </TabsContent>
       </Tabs>
+
+      {sharingDoc && (
+        <DocumentSharingManager
+          documentId={sharingDoc.id}
+          documentName={sharingDoc.name}
+          onClose={() => {
+            setSharingDoc(null);
+            loadDocuments();
+          }}
+        />
+      )}
     </div>
   );
 }
