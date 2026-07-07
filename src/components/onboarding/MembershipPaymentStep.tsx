@@ -180,6 +180,11 @@ const InnerPaymentForm: React.FC<{
           membership_payment_intent_id: paymentIntentId,
           membership_paid_at: serverTimestamp(),
           membership_started_at: serverTimestamp(),
+          // Flip the free-listing follow-up markers now that they've upgraded,
+          // so the admin "signed but not upgraded" list (payment_status ==
+          // 'unpaid') stays accurate.
+          listing_type: 'paid',
+          payment_status: 'paid',
           onboarding_completed: true,
           onboarding_step: 7,
           updated_at: serverTimestamp(),

@@ -769,30 +769,111 @@ export default function TaxProfessionalOnboarding() {
 
     let permissionBlocked = false;
 
-    // 1. Persist signed agreement + jotform answers on the professional doc.
-    //    Wrapped independently so a permission/rules rejection does NOT abort
-    //    the rest of submission — the user still proceeds to payment.
+    // 1. Save the FREE DIRECTORY LISTING. Reaching the Agreement stage MUST
+    //    persist a complete, publicly-listed professional record — regardless
+    //    of whether the earlier profile-save (step 2) succeeded, and whether or
+    //    not the applicant ever completes the optional payment/upgrade (step 7).
+    //
+    //    Why this is an UPSERT (create-or-update) and not a bare updateDoc():
+    //    if step 2's write was blocked (rules/network/session) the applicant is
+    //    still allowed to continue, so the `professionals/{uid}` doc may not
+    //    exist yet. `updateDoc()` throws "No document to update" in that case,
+    //    which is exactly how ~25 signed applicants ended up with NO server
+    //    record. We therefore rebuild the ENTIRE listing from the in-memory
+    //    onboarding data here and create-or-merge it, so a missing doc is fully
+    //    populated at the moment the agreement is signed.
     if (user?.uid) {
+      const selectedServices = (savedData.services || [])
+        .filter((s) => s.selected)
+        .map((s) => ({
+          name: s.name,
+          description: s.description,
+          price: parseFloat(s.price) || 0,
+        }));
+
+      // Complete listing payload — mirrors the fields written by the profile
+      // and services steps, plus the signed-agreement / application fields.
+      const listing: Record<string, any> = {
+        firebase_uid: user.uid,
+        full_name: fullName,
+        first_name: profile.firstName,
+        last_name: profile.lastName,
+        email: profile.email || signed.signerEmail,
+        phone: profile.phone,
+        business_name: profile.businessName,
+        bio: profile.bio,
+        profile_image: profile.profileImage,
+        profile_image_url: profile.profileImage,
+        business_address: profile.businessAddress,
+        city: profile.city,
+        state: profile.state,
+        zip_code: profile.zipCode,
+        location: `${profile.city}${profile.city && profile.state ? ', ' : ''}${profile.state}`.trim(),
+        services: selectedServices.map((s) => s.name),
+        services_detailed: selectedServices,
+        intake_answers: jotform,
+        // Publicly listed & approved so the free listing is live immediately.
+        is_published: true,
+        approval_status: 'approved',
+        // Follow-up markers: the applicant has signed but has NOT yet upgraded.
+        // The admin can query listing_type == 'free' / payment_status ==
+        // 'unpaid' to build the follow-up list for optional upgrades later.
+        listing_type: 'free',
+        payment_status: 'unpaid',
+        free_listing_saved_at: serverTimestamp(),
+        application_status: 'submitted',
+        application_submitted_at: serverTimestamp(),
+        signed_agreement: {
+          ...signed,
+          clientIp: signed.clientIp ?? null,
+        },
+        terms_agreement_version: signed.agreementVersion,
+        terms_signed_at: signed.signedAt,
+        updated_at: serverTimestamp(),
+      };
+
+      const ref = doc(db, 'professionals', user.uid);
+
+      // Create-or-update so a missing doc gets fully created. On create we seed
+      // the defaults a brand-new listing needs; on update we must NOT clobber a
+      // membership_level already set by a completed payment, so those seed
+      // fields are only written when the doc doesn't exist yet.
+      const writeListing = async () => {
+        const existing = await getDoc(ref);
+        if (existing.exists()) {
+          await updateDoc(ref, listing);
+        } else {
+          await setDoc(ref, {
+            ...listing,
+            membership_level: 'Free',
+            rating: 0,
+            review_count: 0,
+            years_experience: 0,
+            created_at: serverTimestamp(),
+          });
+        }
+      };
+
       try {
         await ensureFreshAuth();
-        const ref = doc(db, 'professionals', user.uid);
-        await updateDoc(ref, {
-          application_status: 'submitted',
-          application_submitted_at: serverTimestamp(),
-          intake_answers: jotform,
-          signed_agreement: {
-            ...signed,
-            clientIp: signed.clientIp ?? null,
-          },
-          terms_agreement_version: signed.agreementVersion,
-          terms_signed_at: signed.signedAt,
-        });
+        try {
+          await writeListing();
+        } catch (firstErr: any) {
+          // One automatic retry after forcing a fresh token (covers a genuinely
+          // expired token). If it still fails, it propagates to the outer catch.
+          if (isPermissionError(firstErr)) {
+            await ensureFreshAuth();
+            await writeListing();
+          } else {
+            throw firstErr;
+          }
+        }
       } catch (proErr: any) {
         if (isPermissionError(proErr)) {
           permissionBlocked = true;
-          console.warn('Professional doc update blocked by rules (non-blocking):', proErr);
+          console.warn('Free directory listing blocked by rules (non-blocking):', proErr);
         } else {
-          console.warn('Professional doc update failed (non-blocking):', proErr);
+          console.warn('Free directory listing write failed (non-blocking):', proErr);
         }
       }
     }
@@ -800,14 +881,34 @@ export default function TaxProfessionalOnboarding() {
     // 2. Also write a permanent immutable record in a dedicated collection
     //    for legal/audit purposes. Doc id = uid+timestamp so retries don't
     //    overwrite existing signed copies. Non-blocking.
+    //
+    //    This is our MOST reliable server write (the `signed_agreements` rule
+    //    allows any signed-in user to create), so we enrich it with the full
+    //    contact + business + services + intake snapshot. That guarantees that
+    //    even if the `professionals` listing write above is ever blocked, there
+    //    is still ONE complete server record the team can use to follow up and
+    //    manually restore the listing — no signed applicant is ever lost.
     try {
       const sigId = `${user?.uid || 'anon'}_${Date.now()}`;
+      const selectedServices = (savedData.services || [])
+        .filter((s) => s.selected)
+        .map((s) => ({ name: s.name, price: parseFloat(s.price) || 0 }));
       await setDoc(doc(db, 'signed_agreements', sigId), {
         ...signed,
         clientIp: signed.clientIp ?? null,
         firebase_uid: user?.uid || null,
         applicant_email: signed.signerEmail,
         applicant_name: signed.signerName,
+        // Full applicant snapshot for follow-up (the listing is free; the
+        // upgrade/payment is optional and may never happen).
+        applicant_phone: profile.phone || '',
+        business_name: profile.businessName || '',
+        city: profile.city || '',
+        state: profile.state || '',
+        services: selectedServices,
+        intake_answers: jotform,
+        listing_type: 'free',
+        payment_status: 'unpaid',
         created_at: serverTimestamp(),
       });
     } catch (auditErr) {
